@@ -3963,34 +3963,76 @@ static bool func_params_contain_await(const sv_ast_t *node) {
   return false;
 }
 
-static bool function_param_name(sv_ast_t *param, const char **name, uint32_t *len) {
-  if (!param) return false;
+static bool collect_param_bindings(sv_ast_t *param, sv_ast_list_t *names) {
+  static const void *dispatch[N__COUNT] = {
+    [N_IDENT]      = &&l_ident,
+    [N_ASSIGN]     = &&l_left,
+    [N_ASSIGN_PAT] = &&l_left,
+    [N_REST]       = &&l_right,
+    [N_SPREAD]     = &&l_right,
+    [N_PROPERTY]   = &&l_right,
+    [N_ARRAY]      = &&l_items,
+    [N_ARRAY_PAT]  = &&l_items,
+    [N_OBJECT]     = &&l_items,
+    [N_OBJECT_PAT] = &&l_items,
+  };
 
-  if (param->type == N_IDENT) {
-    *name = param->str;
-    *len = param->len;
-    return true;
+  if (!param) return true;
+  if ((unsigned)param->type >= N__COUNT || !dispatch[param->type]) return true;
+  goto *dispatch[param->type];
+
+l_ident:
+  if (!param->len) return true;
+  return sv_ast_list_push(names, param);
+
+l_left:
+  return collect_param_bindings(param->left, names);
+
+l_right:
+  return collect_param_bindings(param->right, names);
+
+l_items:
+  for (int i = 0; i < param->args.count; i++)
+    if (!collect_param_bindings(param->args.items[i], names)) return false;
+  return true;
+}
+
+static int compare_param_names(const void *left, const void *right) {
+  const sv_ast_t *a = *(sv_ast_t *const *)left;
+  const sv_ast_t *b = *(sv_ast_t *const *)right;
+  if (a->len != b->len) return a->len < b->len ? -1 : 1;
+  return memcmp(a->str, b->str, a->len);
+}
+
+static bool check_function_param_names(ant_t *js, sv_ast_t *fn, bool strict, bool emit_error) {
+  sv_ast_t *items[16];
+  sv_ast_list_t names = {.items = items, .cap = sizeof(items) / sizeof(items[0])};
+
+  for (int i = 0; i < fn->args.count; i++) {
+    if (collect_param_bindings(fn->args.items[i], &names)) continue;
+    if (emit_error) js_mkerr(js, "out of memory");
+    return false;
   }
 
-  if (
-    param->type == N_REST &&
-    param->right && param->right->type == N_IDENT
-  ) {
-    *name = param->right->str;
-    *len = param->right->len;
-    return true;
-  }
+  if (names.count > 1)
+    qsort(names.items, (size_t)names.count, sizeof(*names.items), compare_param_names);
 
-  if (
-    param->type == N_ASSIGN_PAT &&
-    param->left && param->left->type == N_IDENT
-  ) {
-    *name = param->left->str;
-    *len = param->left->len;
-    return true;
-  }
+  for (int i = 0; i < names.count; i++) {
+    sv_ast_t *name = names.items[i];
+    if (strict && is_strict_restricted_ident(name->str, name->len)) {
+      if (emit_error) js_mkerr_typed(js, JS_ERR_SYNTAX,
+        "strict mode forbids '%.*s' as a parameter name", (int)name->len, name->str);
+      return false;
+    }
 
-  return false;
+    if (i == 0) continue;
+    sv_ast_t *prev = names.items[i - 1];
+    if (!is_ident_str(name->str, name->len, prev->str, prev->len)) continue;
+    if (emit_error) js_mkerr_typed(js, JS_ERR_SYNTAX,
+      "duplicate parameter name '%.*s'", (int)name->len, name->str);
+    return false;
+  }
+  return true;
 }
 
 static bool function_has_own_use_strict(ant_t *js, sv_ast_t *fn) {
@@ -3999,6 +4041,14 @@ static bool function_has_own_use_strict(ant_t *js, sv_ast_t *fn) {
     if (!stmt || stmt->type == N_EMPTY) continue;
     if (stmt->type != N_STRING) break;
     if (sv_ast_is_use_strict(js, stmt)) return true;
+  }
+  return false;
+}
+
+static bool function_has_non_simple_params(sv_ast_t *fn) {
+  for (int i = 0; i < fn->args.count; i++) {
+    sv_ast_t *param = fn->args.items[i];
+    if (!param || param->type != N_IDENT) return true;
   }
   return false;
 }
@@ -4027,72 +4077,17 @@ static bool check_function_param_early_errors(
   if (out_has_own_use_strict) *out_has_own_use_strict = has_own_use_strict;
 
   bool strict = inherited_strict || (fn->flags & FN_CLASS_BODY) || has_own_use_strict;
-  bool has_non_simple_params = false;
-  
-  const char **param_names = NULL;
-  uint32_t *param_lens = NULL;
-  
-  int param_name_count = 0;
-  bool ok = true;
-
-  if (strict && fn->args.count > 0) {
-    size_t count = (size_t)fn->args.count;
-    param_names = malloc(count * sizeof(*param_names));
-    param_lens = malloc(count * sizeof(*param_lens));
-    
-    if (!param_names || !param_lens) {
-      if (emit_error) js_mkerr(js, "out of memory");
-      ok = false;
-      goto done;
-    }
-  }
-
-  for (int i = 0; i < fn->args.count; i++) {
-    sv_ast_t *param = fn->args.items[i];
-    if (!param || param->type != N_IDENT) has_non_simple_params = true;
-
-    const char *name = NULL;
-    uint32_t len = 0;
-    if (!function_param_name(param, &name, &len) || len == 0) continue;
-
-    if (strict && is_strict_restricted_ident(name, len)) {
-      if (emit_error) js_mkerr_typed(js, JS_ERR_SYNTAX,
-        "strict mode forbids '%.*s' as a parameter name",
-        (int)len, name);
-      ok = false;
-      goto done;
-    }
-
-    if (strict) for (int j = 0; j < param_name_count; j++) {
-      if (param_lens[j] != len || memcmp(param_names[j], name, len) != 0) continue;
-      if (emit_error) js_mkerr_typed(js, JS_ERR_SYNTAX,
-        "duplicate parameter name '%.*s' in strict mode",
-        (int)len, name);
-      ok = false;
-      goto done;
-    }
-
-    if (strict) {
-      param_names[param_name_count] = name;
-      param_lens[param_name_count] = len;
-      param_name_count++;
-    }
-  }
-
-  if (out_has_non_simple_params)
-    *out_has_non_simple_params = has_non_simple_params;
+  bool has_non_simple_params = function_has_non_simple_params(fn);
+  if (out_has_non_simple_params) *out_has_non_simple_params = has_non_simple_params;
 
   if (has_own_use_strict && has_non_simple_params) {
     if (emit_error) js_mkerr_typed(js, JS_ERR_SYNTAX,
       "Illegal 'use strict' directive in function with non-simple parameter list");
-    ok = false;
-    goto done;
+    return false;
   }
 
-done:
-  free(param_names);
-  free(param_lens);
-  return ok;
+  if (!strict && !has_non_simple_params && !(fn->flags & (FN_ARROW | FN_METHOD))) return true;
+  return check_function_param_names(js, fn, strict, emit_error);
 }
 
 static bool is_inline_literal_eval_expr(sv_ast_t *node) {
@@ -4138,29 +4133,29 @@ static bool is_inline_literal_eval_expr(sv_ast_t *node) {
   }
 }
 
-static bool inline_eval_can_compile_without_early_errors(sv_compiler_t *c, sv_ast_t *node) {
+static bool inline_eval_can_compile_without_early_errors(ant_t *js, sv_ast_t *node, bool strict) {
   if (!node) return true;
   if (node->type == N_CLASS) return false;
   
-  if (
-    node->type == N_FUNC &&
-    (!(node->flags & (FN_ARROW | FN_PAREN)) ||
-     !check_function_param_early_errors(c->js, node, c->is_strict, NULL, NULL, false))
-  ) return false;
-
-  if (!inline_eval_can_compile_without_early_errors(c, node->left)) return false;
-  if (!inline_eval_can_compile_without_early_errors(c, node->right)) return false;
-  if (!inline_eval_can_compile_without_early_errors(c, node->cond)) return false;
-  if (!inline_eval_can_compile_without_early_errors(c, node->body)) return false;
-  if (!inline_eval_can_compile_without_early_errors(c, node->catch_body)) return false;
-  if (!inline_eval_can_compile_without_early_errors(c, node->finally_body)) return false;
-  if (!inline_eval_can_compile_without_early_errors(c, node->catch_param)) return false;
-  if (!inline_eval_can_compile_without_early_errors(c, node->init)) return false;
-  if (!inline_eval_can_compile_without_early_errors(c, node->update)) return false;
-
-  for (int i = 0; i < node->args.count; i++) {
-    if (!inline_eval_can_compile_without_early_errors(c, node->args.items[i])) return false;
+  if (node->type == N_FUNC) {
+    bool has_own_use_strict = false;
+    if (!(node->flags & (FN_ARROW | FN_PAREN))) return false;
+    if (!check_function_param_early_errors(js, node, strict, &has_own_use_strict, NULL, false)) return false;
+    strict = strict || has_own_use_strict || (node->flags & FN_CLASS_BODY);
   }
+
+  if (!inline_eval_can_compile_without_early_errors(js, node->left, strict)) return false;
+  if (!inline_eval_can_compile_without_early_errors(js, node->right, strict)) return false;
+  if (!inline_eval_can_compile_without_early_errors(js, node->cond, strict)) return false;
+  if (!inline_eval_can_compile_without_early_errors(js, node->body, strict)) return false;
+  if (!inline_eval_can_compile_without_early_errors(js, node->catch_body, strict)) return false;
+  if (!inline_eval_can_compile_without_early_errors(js, node->finally_body, strict)) return false;
+  if (!inline_eval_can_compile_without_early_errors(js, node->catch_param, strict)) return false;
+  if (!inline_eval_can_compile_without_early_errors(js, node->init, strict)) return false;
+  if (!inline_eval_can_compile_without_early_errors(js, node->update, strict)) return false;
+
+  for (int i = 0; i < node->args.count; i++)
+    if (!inline_eval_can_compile_without_early_errors(js, node->args.items[i], strict)) return false;
 
   return true;
 }
@@ -4194,7 +4189,7 @@ static bool compile_inline_literal_eval(sv_compiler_t *c, sv_ast_t *node) {
     program->args.count == 1 &&
     is_inline_literal_eval_expr(program->args.items[0]) &&
     (c->allows_new_target || !ast_contains_lexical_new_target(program)) &&
-    inline_eval_can_compile_without_early_errors(c, program->args.items[0]) &&
+    inline_eval_can_compile_without_early_errors(c->js, program->args.items[0], c->is_strict) &&
     !ast_contains_direct_suspend(program->args.items[0], NULL)
   ) expr = program->args.items[0]; else {
     parse_arena_rewind(mark);
@@ -7092,7 +7087,7 @@ static bool ast_has_own_eval(sv_compiler_t *c, const sv_ast_t *node) {
       bool needs_env = !program || (program->args.count != 0 &&
         (program->args.count != 1 ||
          !is_inline_literal_eval_expr(program->args.items[0]) ||
-         !inline_eval_can_compile_without_early_errors(c, program->args.items[0]) ||
+         !inline_eval_can_compile_without_early_errors(c->js, program->args.items[0], c->is_strict) ||
          ast_contains_direct_suspend(program->args.items[0], NULL) ||
          ast_has_own_eval(c, program->args.items[0])));
       parse_arena_rewind(mark);

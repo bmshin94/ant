@@ -161,7 +161,7 @@ struct sv_ast {
   uint32_t        src_end;
 };
 
-void sv_ast_list_push(sv_ast_list_t *list, sv_ast_t *node);
+bool sv_ast_list_push(sv_ast_list_t *list, sv_ast_t *node);
 bool sv_ast_can_be_expression_statement(const sv_ast_t *node);
 bool ast_references_arguments(const sv_ast_t *node);
 bool ast_references_new_target(const sv_ast_t *node);

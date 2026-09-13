@@ -21,17 +21,18 @@ sv_ast_t *sv_ast_new(sv_node_type_t type) {
   return n;
 }
 
-void sv_ast_list_push(sv_ast_list_t *list, sv_ast_t *node) {
+bool sv_ast_list_push(sv_ast_list_t *list, sv_ast_t *node) {
   if (list->count >= list->cap) {
     int new_cap = list->cap ? list->cap * 2 : 4;
     sv_ast_t **new_items = parse_arena_bump((size_t)new_cap * sizeof(sv_ast_t *));
-    if (!new_items) return;
+    if (!new_items) return false;
     if (list->items)
       memcpy(new_items, list->items, (size_t)list->count * sizeof(sv_ast_t *));
     list->items = new_items;
     list->cap = new_cap;
   }
   list->items[list->count++] = node;
+  return true;
 }
 
 bool sv_ast_can_be_expression_statement(const sv_ast_t *node) {
