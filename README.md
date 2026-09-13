@@ -53,7 +53,7 @@ Ant targets the [WinterTC Minimum Common API](https://min-common-api.proposal.wi
 | ------------ | --------- | ----------------------------------------- |
 | compat-table | **100%**  | 1511/1511 (ES1–ES5, ES6, ES2016+, ESNext) |
 | Temporal     | **100%**  | 4603/4603 at revision 2026-08-10          |
-| test262      | ~65%      | 34758/53578 at revision 2026-08-10        |
+| test262      | ~66%      | 35590/53578 at revision 2026-09-13        |
 
 ## Benchmarks
 
