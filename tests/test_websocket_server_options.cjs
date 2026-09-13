@@ -81,11 +81,11 @@ async function connectWebSocket(port) {
   });
 }
 
-function sendMaskedFrame(socket, opcode, payload, rsv1 = false) {
+function sendMaskedFrame(socket, opcode, payload, rsv1 = false, fin = true) {
   const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
   const mask = crypto.randomBytes(4);
   const header = [];
-  header.push(0x80 | (rsv1 ? 0x40 : 0) | opcode);
+  header.push((fin ? 0x80 : 0) | (rsv1 ? 0x40 : 0) | opcode);
   if (bytes.length < 126) {
     header.push(0x80 | bytes.length);
   } else if (bytes.length <= 0xffff) {
@@ -213,8 +213,29 @@ export default {
     assert.equal(echo.rsv1, true);
     assert.equal(inflateMessage(echo.payload), 'echo:hello');
 
+    // A second compressed message on the same socket exercises the per-socket
+    // inflate/deflate stream reset (no_context_takeover).
+    sendMaskedFrame(socket, 0x1, deflatedWebSocketHello(), true);
+    const echo2 = await readFrame(socket, echo.rest);
+    assert.equal(echo2.opcode, 0x1);
+    assert.equal(echo2.rsv1, true);
+    assert.equal(inflateMessage(echo2.payload), 'echo:hello');
+
+    // A fragmented text message: opcode 1 without FIN, then a continuation.
+    sendMaskedFrame(socket, 0x1, 'frag', false, false);
+    sendMaskedFrame(socket, 0x0, 'ment', false, true);
+    const echo3 = await readFrame(socket, echo2.rest);
+    assert.equal(echo3.opcode, 0x1);
+    assert.equal(inflateMessage(echo3.payload), 'echo:fragment');
+
+    // And a second fragmented message, reusing the retained fragment buffer.
+    sendMaskedFrame(socket, 0x1, 'ag', false, false);
+    sendMaskedFrame(socket, 0x0, 'ain', false, true);
+    const echo4 = await readFrame(socket, echo3.rest);
+    assert.equal(inflateMessage(echo4.payload), 'echo:again');
+
     sendMaskedFrame(socket, 0x1, 'x'.repeat(65));
-    const close = await readFrame(socket, echo.rest);
+    const close = await readFrame(socket, echo4.rest);
     assert.equal(close.opcode, 0x8);
     assert.equal(close.payload.readUInt16BE(0), 1009);
     socket.end();

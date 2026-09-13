@@ -114,8 +114,29 @@ char *ant_ws_accept_key(const char *client_key) {
 
 void ant_ws_frame_clear(ant_ws_frame_t *frame) {
   if (!frame) return;
-  free(frame->payload);
+  if (frame->owned) free(frame->payload);
   memset(frame, 0, sizeof(*frame));
+}
+
+void ant_ws_unmask(uint8_t *data, size_t len, const uint8_t mask[4]) {
+  size_t i = 0;
+  if (len >= 8) {
+    uint64_t mask64 = 0;
+    uint8_t rep[8] = { 
+      mask[0], mask[1], mask[2], mask[3], 
+      mask[0], mask[1], mask[2], mask[3] 
+    };
+    
+    memcpy(&mask64, rep, 8);
+    for (; i + 8 <= len; i += 8) {
+      uint64_t word = 0;
+      memcpy(&word, data + i, 8);
+      word ^= mask64;
+      memcpy(data + i, &word, 8);
+    }
+  }
+  
+  for (; i < len; i++) data[i] ^= mask[i & 3];
 }
 
 static uint64_t ant_ws_read_u64_be(const uint8_t *data) {
@@ -125,10 +146,11 @@ static uint64_t ant_ws_read_u64_be(const uint8_t *data) {
 }
 
 ant_ws_frame_result_t ant_ws_parse_frame(
-  const uint8_t *data,
+  uint8_t *data,
   size_t len,
   bool require_mask,
   bool allow_rsv1,
+  bool inplace,
   ant_ws_frame_t *out
 ) {
   size_t pos = 2;
@@ -162,20 +184,28 @@ ant_ws_frame_result_t ant_ws_parse_frame(
   }
 
   if (payload_len > SIZE_MAX) return ANT_WS_FRAME_PROTOCOL_ERROR;
+  
   if (masked) {
     if (len < pos + 4) return ANT_WS_FRAME_INCOMPLETE;
     memcpy(out->mask, data + pos, 4);
     pos += 4;
   }
+  
   if (len < pos + (size_t)payload_len) return ANT_WS_FRAME_INCOMPLETE;
 
-  out->payload = malloc((size_t)payload_len + 1);
-  if (!out->payload) return ANT_WS_FRAME_PROTOCOL_ERROR;
-  if (payload_len > 0) memcpy(out->payload, data + pos, (size_t)payload_len);
-  out->payload[payload_len] = 0;
-  if (masked) {
-    for (size_t i = 0; i < (size_t)payload_len; i++) out->payload[i] ^= out->mask[i % 4];
+  if (inplace) {
+    out->payload = data + pos;
+    out->owned = false;
+  } else {
+    out->payload = malloc((size_t)payload_len + 1);
+    if (!out->payload) return ANT_WS_FRAME_PROTOCOL_ERROR;
+    if (payload_len > 0) memcpy(out->payload, data + pos, (size_t)payload_len);
+    out->payload[payload_len] = 0;
+    out->owned = true;
   }
+  
+  if (masked && payload_len > 0) 
+    ant_ws_unmask(out->payload, (size_t)payload_len, out->mask);
 
   out->fin = (data[0] & 0x80u) != 0;
   out->rsv1 = (data[0] & 0x40u) != 0;
@@ -188,10 +218,8 @@ ant_ws_frame_result_t ant_ws_parse_frame(
 }
 
 static void ant_ws_write_u64_be(uint8_t *out, uint64_t value) {
-for (int i = 7; i >= 0; i--) {
-  out[i] = (uint8_t)(value & 0xffu);
-  value >>= 8;
-}}
+  for (int i = 7; i >= 0; i--) { out[i] = (uint8_t)(value & 0xffu); value >>= 8; }
+}
 
 uint8_t *ant_ws_encode_frame(
   ant_ws_opcode_t opcode,

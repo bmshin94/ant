@@ -11,15 +11,19 @@
 #include <zlib.h>
 
 #include "ant.h"
+#include "gc.h"
 #include "common.h"
 #include "errors.h"
 #include "inspector.h"
 #include "internal.h"
 #include "ptr.h"
+#include "descriptors.h"
 #include "silver/call.h"
 
 #include "http/websocket.h"
+#include "modules/blob.h"
 #include "modules/buffer.h"
+#include "modules/events.h"
 #include "modules/symbol.h"
 #include "modules/websocket.h"
 #include "net/listener.h"
@@ -37,17 +41,22 @@ typedef struct websocket_state_s {
   size_t fragment_len;
   size_t fragment_cap;
   size_t max_payload_len;
+  z_stream deflate_strm;
+  z_stream inflate_strm;
   ant_ws_opcode_t fragment_opcode;
   uint16_t client_close_code;
   uint8_t ready_state;
-  bool is_client : 1;
-  bool close_emitted : 1;
-  bool active : 1;
-  bool client_close_started : 1;
-  bool client_close_was_clean : 1;
-  bool fragmenting : 1;
-  bool fragment_compressed : 1;
-  bool per_message_deflate : 1;
+  bool is_client: 1;
+  bool close_emitted: 1;
+  bool active: 1;
+  bool client_close_started: 1;
+  bool client_close_was_clean: 1;
+  bool fragmenting: 1;
+  bool fragment_compressed: 1;
+  bool per_message_deflate: 1;
+  bool deflate_ready: 1;
+  bool inflate_ready: 1;
+  bool binary_type_blob: 1;
 } websocket_state_t;
 
 enum {
@@ -92,15 +101,20 @@ static void websocket_remove_active(websocket_state_t *ws) {
   ws->active = false;
 }
 
-static void websocket_fragment_clear(websocket_state_t *ws) {
+static void websocket_fragment_reset(websocket_state_t *ws) {
   if (!ws) return;
-  free(ws->fragment_buf);
-  ws->fragment_buf = NULL;
   ws->fragment_len = 0;
-  ws->fragment_cap = 0;
   ws->fragment_opcode = 0;
   ws->fragmenting = false;
   ws->fragment_compressed = false;
+}
+
+static void websocket_fragment_clear(websocket_state_t *ws) {
+  if (!ws) return;
+  websocket_fragment_reset(ws);
+  free(ws->fragment_buf);
+  ws->fragment_buf = NULL;
+  ws->fragment_cap = 0;
 }
 
 static bool websocket_fragment_append(websocket_state_t *ws, const uint8_t *data, size_t len) {
@@ -127,6 +141,8 @@ static void websocket_free_state(websocket_state_t *ws) {
   if (!ws) return;
   websocket_remove_active(ws);
   websocket_fragment_clear(ws);
+  if (ws->deflate_ready) deflateEnd(&ws->deflate_strm);
+  if (ws->inflate_ready) inflateEnd(&ws->inflate_strm);
   free(ws);
 }
 
@@ -144,7 +160,6 @@ static ant_value_t websocket_call(ant_t *js, ant_value_t fn, ant_value_t this_va
 static void websocket_sync_state(websocket_state_t *ws) {
   if (!ws || !is_object_type(ws->obj)) return;
   js_set(ws->js, ws->obj, "readyState", js_mknum(ws->ready_state));
-  js_set(ws->js, ws->obj, "bufferedAmount", js_mknum(0));
 }
 
 static ant_value_t websocket_make_event(ant_t *js, ant_value_t proto, const char *type) {
@@ -160,10 +175,15 @@ static ant_value_t websocket_make_event(ant_t *js, ant_value_t proto, const char
   return event;
 }
 
-static bool websocket_deflate_message(const uint8_t *data, size_t len, uint8_t **out, size_t *out_len) {
-  static const uint8_t flush_tail[] = { 0x00, 0x00, 0xff, 0xff };
-  z_stream strm;
+static const uint8_t ws_deflate_flush_tail[] = { 
+  0x00, 0x00, 
+  0xff, 0xff 
+};
+
+static bool websocket_deflate_message(websocket_state_t *ws, const uint8_t *data, size_t len, uint8_t **out, size_t *out_len) {
+  z_stream *strm = &ws->deflate_strm;
   uint8_t *buf = NULL;
+  
   uLong bound = 0;
   int rc = 0;
 
@@ -171,156 +191,227 @@ static bool websocket_deflate_message(const uint8_t *data, size_t len, uint8_t *
   if (out_len) *out_len = 0;
   if (!out || !out_len) return false;
 
-  memset(&strm, 0, sizeof(strm));
-  rc = deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
-  if (rc != Z_OK) return false;
+  if (!ws->deflate_ready) {
+    memset(strm, 0, sizeof(*strm));
+    if (deflateInit2(strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) return false;
+    ws->deflate_ready = true;
+  } else if (deflateReset(strm) != Z_OK) return false;
 
-  bound = deflateBound(&strm, (uLong)len) + sizeof(flush_tail);
+  bound = deflateBound(strm, (uLong)len) + sizeof(ws_deflate_flush_tail);
   buf = malloc((size_t)bound);
-  if (!buf) {
-    deflateEnd(&strm);
-    return false;
-  }
+  if (!buf) return false;
 
-  strm.next_in = (Bytef *)(uintptr_t)data;
-  strm.avail_in = (uInt)len;
-  strm.next_out = buf;
-  strm.avail_out = (uInt)bound;
+  strm->next_in = (Bytef *)(uintptr_t)data;
+  strm->avail_in = (uInt)len;
+  strm->next_out = buf;
+  strm->avail_out = (uInt)bound;
 
-  rc = deflate(&strm, Z_SYNC_FLUSH);
-  if (rc != Z_OK || strm.avail_in != 0) {
+  rc = deflate(strm, Z_SYNC_FLUSH);
+  if (rc != Z_OK || strm->avail_in != 0) {
     free(buf);
-    deflateEnd(&strm);
     return false;
   }
 
-  *out_len = strm.total_out;
-  if (*out_len >= sizeof(flush_tail) &&
-      memcmp(buf + *out_len - sizeof(flush_tail), flush_tail, sizeof(flush_tail)) == 0) {
-    *out_len -= sizeof(flush_tail);
+  *out_len = strm->total_out;
+  if (*out_len >= sizeof(ws_deflate_flush_tail) &&
+      memcmp(buf + *out_len - sizeof(ws_deflate_flush_tail), ws_deflate_flush_tail, sizeof(ws_deflate_flush_tail)) == 0) {
+    *out_len -= sizeof(ws_deflate_flush_tail);
   }
 
   *out = buf;
-  deflateEnd(&strm);
+  return true;
+}
+
+static bool websocket_inflate_chunk(
+  z_stream *strm, const uint8_t *in, size_t in_len, size_t max_len,
+  uint8_t **buf, size_t *cap, bool *done
+) {
+  strm->next_in = (Bytef *)(uintptr_t)in;
+  strm->avail_in = (uInt)in_len;
+
+  while (strm->avail_in > 0) {
+    if (strm->total_out == *cap) {
+      size_t next_cap = *cap * 2;
+      if (max_len > 0 && *cap >= max_len) return false;
+      if (next_cap < *cap) return false;
+      if (max_len > 0 && next_cap > max_len) next_cap = max_len;
+      uint8_t *next = realloc(*buf, next_cap);
+      if (!next) return false;
+      *buf = next;
+      *cap = next_cap;
+    }
+
+    strm->next_out = *buf + strm->total_out;
+    strm->avail_out = (uInt)(*cap - strm->total_out);
+    
+    int rc = inflate(strm, Z_SYNC_FLUSH);
+    if (rc == Z_BUF_ERROR && strm->avail_in == 0) break;
+    if (rc != Z_OK && rc != Z_STREAM_END) return false;
+    if (rc == Z_STREAM_END) { *done = true; break; }
+    if (strm->avail_out != 0 && strm->avail_in == 0) break;
+  }
   return true;
 }
 
 static bool websocket_inflate_message(
+  websocket_state_t *ws,
   const uint8_t *data,
   size_t len,
   size_t max_len,
   uint8_t **out,
   size_t *out_len
 ) {
-  static const uint8_t flush_tail[] = { 0x00, 0x00, 0xff, 0xff };
-  z_stream strm;
-  uint8_t *input = NULL;
+  z_stream *strm = &ws->inflate_strm;
   uint8_t *buf = NULL;
-  size_t input_len = len + sizeof(flush_tail);
   size_t cap = len > 1024 ? len * 2 : 1024;
-  int rc = Z_OK;
+  bool done = false;
 
   if (out) *out = NULL;
   if (out_len) *out_len = 0;
-  if (!out || !out_len || input_len < len) return false;
+  if (!out || !out_len) return false;
   if (max_len > 0 && cap > max_len) cap = max_len;
   if (cap == 0) cap = 1;
 
-  input = malloc(input_len);
+  if (!ws->inflate_ready) {
+    memset(strm, 0, sizeof(*strm));
+    if (inflateInit2(strm, -15) != Z_OK) return false;
+    ws->inflate_ready = true;
+  } else if (inflateReset(strm) != Z_OK) return false;
+
   buf = malloc(cap);
-  if (!input || !buf) {
-    free(input);
-    free(buf);
-    return false;
-  }
+  if (!buf) return false;
 
-  if (len > 0) memcpy(input, data, len);
-  memcpy(input + len, flush_tail, sizeof(flush_tail));
+  if (!websocket_inflate_chunk(strm, data, len, max_len, &buf, &cap, &done)) goto fail;
+  if (!done && !websocket_inflate_chunk(strm, ws_deflate_flush_tail, sizeof(ws_deflate_flush_tail), max_len, &buf, &cap, &done)) goto fail;
 
-  memset(&strm, 0, sizeof(strm));
-  rc = inflateInit2(&strm, -15);
-  if (rc != Z_OK) {
-    free(input);
-    free(buf);
-    return false;
-  }
-
-  strm.next_in = input;
-  strm.avail_in = (uInt)input_len;
-
-  while (strm.avail_in > 0) {
-    if (strm.total_out == cap) {
-      size_t next_cap = cap * 2;
-      if (max_len > 0 && cap >= max_len) goto fail;
-      if (next_cap < cap) goto fail;
-      if (max_len > 0 && next_cap > max_len) next_cap = max_len;
-      uint8_t *next = realloc(buf, next_cap);
-      if (!next) goto fail;
-      buf = next;
-      cap = next_cap;
-    }
-
-    strm.next_out = buf + strm.total_out;
-    strm.avail_out = (uInt)(cap - strm.total_out);
-    rc = inflate(&strm, Z_SYNC_FLUSH);
-    if (rc == Z_BUF_ERROR && strm.avail_in == 0) break;
-    if (rc != Z_OK && rc != Z_STREAM_END) goto fail;
-    if (rc == Z_STREAM_END) break;
-    if (strm.avail_out != 0 && strm.avail_in == 0) break;
-  }
-
-  if (max_len > 0 && strm.total_out > max_len) goto fail;
-  *out_len = strm.total_out;
+  if (max_len > 0 && strm->total_out > max_len) goto fail;
+  *out_len = strm->total_out;
   *out = buf;
-  inflateEnd(&strm);
-  free(input);
+  
   return true;
 
 fail:
-  inflateEnd(&strm);
-  free(input);
   free(buf);
   return false;
 }
 
-static void websocket_emit(websocket_state_t *ws, const char *type, ant_value_t event) {
+static bool websocket_has_listeners(websocket_state_t *ws, const char *type, const char *handler_name, ant_value_t *handler, bool *has_listeners) {
   ant_t *js = ws->js;
-  ant_value_t dispatch = js_get(js, ws->obj, "dispatchEvent");
-  ant_value_t args[1] = { event };
-  char handler_name[32];
+  *has_listeners = eventemitter_listener_count(js, ws->obj, type) > 0;
+  *handler = js_get(js, ws->obj, handler_name);
+  return *has_listeners || is_callable(*handler);
+}
 
-  if (!is_callable(dispatch)) {
-    ant_value_t eventtarget_proto = js_get_ctor_proto(js, "EventTarget", 11);
-    if (is_object_type(eventtarget_proto)) dispatch = js_get(js, eventtarget_proto, "dispatchEvent");
+static void websocket_emit_event(websocket_state_t *ws, ant_value_t event, ant_value_t handler, bool has_listeners) {
+  ant_t *js = ws->js;
+  ant_value_t args[1] = { event };
+
+  if (has_listeners) {
+    ant_value_t dispatch = js_get(js, ws->obj, "dispatchEvent");
+    if (!is_callable(dispatch)) {
+      ant_value_t eventtarget_proto = js_get_ctor_proto(js, "EventTarget", 11);
+      if (is_object_type(eventtarget_proto)) dispatch = js_get(js, eventtarget_proto, "dispatchEvent");
+    }
+    
+    websocket_call(js, dispatch, ws->obj, args, 1);
   }
-  websocket_call(js, dispatch, ws->obj, args, 1);
-  snprintf(handler_name, sizeof(handler_name), "on%s", type);
-  ant_value_t handler = js_get(js, ws->obj, handler_name);
+  
   websocket_call(js, handler, ws->obj, args, 1);
 }
 
-static void websocket_emit_simple(websocket_state_t *ws, const char *type) {
+static void websocket_emit(websocket_state_t *ws, const char *type, const char *handler_name, ant_value_t event) {
+  ant_value_t handler = js_mkundef();
+  bool has_listeners = false;
+  if (!websocket_has_listeners(ws, type, handler_name, &handler, &has_listeners)) return;
+  websocket_emit_event(ws, event, handler, has_listeners);
+}
+
+static void websocket_emit_simple(websocket_state_t *ws, const char *type, const char *handler_name) {
+  ant_value_t handler = js_mkundef();
+  bool has_listeners = false;
+  if (!websocket_has_listeners(ws, type, handler_name, &handler, &has_listeners)) return;
   ant_value_t proto = js_get_ctor_proto(ws->js, "Event", 5);
-  websocket_emit(ws, type, websocket_make_event(ws->js, proto, type));
+  websocket_emit_event(ws, websocket_make_event(ws->js, proto, type), handler, has_listeners);
+}
+
+enum {
+  WS_MSG_SLOT_TYPE,
+  WS_MSG_SLOT_TARGET,
+  WS_MSG_SLOT_CURRENT_TARGET,
+  WS_MSG_SLOT_EVENT_PHASE,
+  WS_MSG_SLOT_BUBBLES,
+  WS_MSG_SLOT_CANCELABLE,
+  WS_MSG_SLOT_DEFAULT_PREVENTED,
+  WS_MSG_SLOT_DATA,
+  WS_MSG_SLOT_ORIGIN,
+  WS_MSG_SLOT_LAST_EVENT_ID,
+};
+
+static ant_value_t websocket_new_message_event(ant_t *js, ant_value_t target, ant_value_t data) {
+  GC_ROOT_SAVE(mark, js);
+  GC_ROOT_PIN(js, data);
+
+  ant_value_t seed = js->mutable_roots.websocket_message_event_template;
+  if (vtype(seed) != kTypeObject) {
+    seed = js_mkobj(js);
+    if (is_err(seed)) { GC_ROOT_RESTORE(js, mark); return seed; }
+    GC_ROOT_PIN(js, seed);
+    
+    if (is_object_type(js->builtins.message_event_proto)) 
+      js_set_proto_init(seed, js->builtins.message_event_proto);
+    
+    js_mkprop_fast(js, seed, "type", 4, js_mkstr(js, "message", 7));
+    js_mkprop_fast(js, seed, "target", 6, js_mknull());
+    js_mkprop_fast(js, seed, "currentTarget", 13, js_mknull());
+    js_mkprop_fast(js, seed, "eventPhase", 10, js_mknum(0));
+    js_mkprop_fast(js, seed, "bubbles", 7, js_false);
+    js_mkprop_fast(js, seed, "cancelable", 10, js_false);
+    js_mkprop_fast(js, seed, "defaultPrevented", 16, js_false);
+    js_mkprop_fast(js, seed, "data", 4, js_mknull());
+    js_mkprop_fast(js, seed, "origin", 6, js_mkstr(js, "", 0));
+    js_mkprop_fast(js, seed, "lastEventId", 11, js_mkstr(js, "", 0));
+    if (js->thrown_exists) { GC_ROOT_RESTORE(js, mark); return mkval(kTypeError, 0); }
+    js->mutable_roots.websocket_message_event_template = seed;
+  }
+
+  ant_value_t event = js_mkobj_from_template(js, seed);
+  if (!is_err(event)) {
+    ant_object_t *obj = js_obj_ptr(event);
+    
+    ant_object_prop_set_unchecked(obj, WS_MSG_SLOT_TARGET, target);
+    gc_write_barrier(js, obj, target);
+    
+    ant_object_prop_set_unchecked(obj, WS_MSG_SLOT_DATA, data);
+    gc_write_barrier(js, obj, data);
+  }
+
+  GC_ROOT_RESTORE(js, mark);
+  return event;
 }
 
 static void websocket_emit_message(websocket_state_t *ws, const uint8_t *data, size_t len, bool binary) {
   ant_t *js = ws->js;
-  ant_value_t event = websocket_make_event(js, js->builtins.message_event_proto, "message");
+  ant_value_t handler = js_mkundef();
   ant_value_t data_val = 0;
+  
+  bool has_listeners = false;
+  if (!websocket_has_listeners(ws, "message", "onmessage", &handler, &has_listeners)) return;
 
   if (binary) {
-    ArrayBufferData *ab = create_array_buffer_data(len);
-    if (!ab) return;
-    if (len > 0) memcpy(ab->data, data, len);
-    data_val = create_typed_array(js, TYPED_ARRAY_UINT8, ab, 0, len, "Uint8Array");
-  } else {
-    data_val = js_mkstr(js, data, len);
-  }
-  js_set(js, event, "data", data_val);
-  js_set(js, event, "origin", js_mkstr(js, "", 0));
-  js_set(js, event, "lastEventId", js_mkstr(js, "", 0));
-  websocket_emit(ws, "message", event);
+    if (ws->binary_type_blob) data_val = blob_create(js, data, len, "");
+    else {
+      ArrayBufferData *ab = create_array_buffer_data(len);
+      if (!ab) return;
+      if (len > 0) memcpy(ab->data, data, len);
+      data_val = create_arraybuffer_obj(js, ab);
+    }
+  } else data_val = js_mkstr(js, data, len);
+
+  if (is_err(data_val)) return;
+  ant_value_t event = websocket_new_message_event(js, ws->obj, data_val);
+  
+  if (is_err(event)) return;
+  websocket_emit_event(ws, event, handler, has_listeners);
 }
 
 static void websocket_emit_close(websocket_state_t *ws, uint16_t code, const char *reason, bool was_clean) {
@@ -337,7 +428,7 @@ static void websocket_emit_close(websocket_state_t *ws, uint16_t code, const cha
   js_set(js, event, "code", js_mknum(code));
   js_set(js, event, "reason", js_mkstr(js, reason ? reason : "", reason ? strlen(reason) : 0));
   js_set(js, event, "wasClean", js_bool(was_clean));
-  websocket_emit(ws, "close", event);
+  websocket_emit(ws, "close", "onclose", event);
 }
 
 static void websocket_client_close_cb(uv_handle_t *handle) {
@@ -366,7 +457,7 @@ static void websocket_client_connect_cb(uv_connect_t *req, int status) {
     ws->ready_state = WS_OPEN;
     
     websocket_sync_state(ws);
-    websocket_emit_simple(ws, "open");
+    websocket_emit_simple(ws, "open", "onopen");
     
     return;
   }
@@ -375,7 +466,7 @@ static void websocket_client_connect_cb(uv_connect_t *req, int status) {
   ant_inspector_websocket_error(ws->inspector_request_id, uv_strerror(status));
   
   websocket_sync_state(ws);
-  websocket_emit_simple(ws, "error");
+  websocket_emit_simple(ws, "error", "onerror");
   websocket_close_client(ws, 1006, false);
 }
 
@@ -384,15 +475,16 @@ static void websocket_client_read_cb(uv_stream_t *handle, ssize_t nread, const u
   if (!ws) return;
 
   if (nread > 0) {
-    ant_inspector_websocket_frame_received(ws->inspector_request_id, (const uint8_t *)buf->base, (size_t)nread, false);
-    websocket_emit_message(ws, (const uint8_t *)buf->base, (size_t)nread, false);
+    bool binary = ws->client.last_frame_binary;
+    ant_inspector_websocket_frame_received(ws->inspector_request_id, (const uint8_t *)buf->base, (size_t)nread, binary);
+    websocket_emit_message(ws, (const uint8_t *)buf->base, (size_t)nread, binary);
     return;
   }
 
   if (nread < 0) {
     if (nread != UV_EOF) {
       ant_inspector_websocket_error(ws->inspector_request_id, uv_strerror((int)nread));
-      websocket_emit_simple(ws, "error");
+      websocket_emit_simple(ws, "error", "onerror");
     }
     ws->ready_state = WS_CLOSING;
     websocket_sync_state(ws);
@@ -460,8 +552,6 @@ static ant_value_t websocket_create_object(ant_t *js) {
   ant_value_t obj = js_mkobj(js);
   if (is_object_type(js->builtins.websocket_proto)) js_set_proto_init(obj, js->builtins.websocket_proto);
   js_set_slot(obj, SLOT_BRAND, js_mknum(BRAND_EVENTTARGET));
-  js_set(js, obj, "binaryType", js_mkstr(js, "arraybuffer", 11));
-  js_set_descriptor(js, obj, "binaryType", 10, JS_DESC_W | JS_DESC_C);
   js_set(js, obj, "bufferedAmount", js_mknum(0));
   js_set(js, obj, "extensions", js_mkstr(js, "", 0));
   js_set(js, obj, "protocol", js_mkstr(js, "", 0));
@@ -513,11 +603,32 @@ static ant_value_t js_websocket_ctor(ant_params_t) {
     ant_inspector_websocket_error(ws->inspector_request_id, uv_strerror(rc));
     
     websocket_sync_state(ws);
-    websocket_emit_simple(ws, "error");
+    websocket_emit_simple(ws, "error", "onerror");
     websocket_close_client(ws, 1006, false);
   }
 
   return obj;
+}
+
+static ant_value_t js_websocket_get_binary_type(ant_params_t) {
+  websocket_state_t *ws = websocket_data(js_getthis(js));
+  if (!ws) return js_mkerr_typed(js, JS_ERR_TYPE, "Invalid WebSocket");
+  return ws->binary_type_blob ? js_mkstr(js, "blob", 4) : js_mkstr(js, "arraybuffer", 11);
+}
+
+static ant_value_t js_websocket_set_binary_type(ant_params_t) {
+  websocket_state_t *ws = websocket_data(js_getthis(js));
+  if (!ws) return js_mkerr_typed(js, JS_ERR_TYPE, "Invalid WebSocket");
+  if (nargs < 1) return js_mkundef();
+  
+  ant_value_t str = js_tostring_val(js, args[0]);
+  if (is_err(str)) return str;
+  
+  const char *value = js_getstr(js, str, NULL);
+  if (value && strcmp(value, "blob") == 0) ws->binary_type_blob = true;
+  else if (value && strcmp(value, "arraybuffer") == 0) ws->binary_type_blob = false;
+  
+  return js_mkundef();
 }
 
 static bool websocket_bytes_from_value(ant_t *js, ant_value_t value, const uint8_t **bytes, size_t *len, ant_value_t *owned_str) {
@@ -561,7 +672,7 @@ static ant_value_t js_websocket_send(ant_params_t) {
     size_t compressed_len = 0;
     bool compressed_frame = false;
     if (ws->per_message_deflate) {
-      if (!websocket_deflate_message(bytes, len, &compressed, &compressed_len))
+      if (!websocket_deflate_message(ws, bytes, len, &compressed, &compressed_len))
         return js_mkerr_typed(js, JS_ERR_TYPE, "Out of memory");
       bytes = compressed;
       len = compressed_len;
@@ -678,7 +789,7 @@ void ant_websocket_server_open(ant_t *js, ant_value_t socket_obj) {
   if (!ws) return;
   ws->ready_state = WS_OPEN;
   websocket_sync_state(ws);
-  websocket_emit_simple(ws, "open");
+  websocket_emit_simple(ws, "open", "onopen");
 }
 
 void ant_websocket_server_on_read(ant_t *js, ant_value_t socket_obj, ant_conn_t *conn) {
@@ -695,17 +806,17 @@ void ant_websocket_server_on_read(ant_t *js, ant_value_t socket_obj, ant_conn_t 
 
   while (ant_conn_buffer_len(conn) > 0) {
     ant_ws_frame_t frame = {0};
+    
     ant_ws_frame_result_t result = ant_ws_parse_frame(
-      (const uint8_t *)ant_conn_buffer(conn),
-      ant_conn_buffer_len(conn),
-      true,
-      ws->per_message_deflate,
-      &frame
+      (uint8_t *)(uintptr_t)ant_conn_buffer(conn),
+      ant_conn_buffer_len(conn), true,
+      ws->per_message_deflate, true, &frame
     );
     
     if (result == ANT_WS_FRAME_INCOMPLETE) return;
+    
     if (result == ANT_WS_FRAME_PROTOCOL_ERROR) {
-      websocket_emit_simple(ws, "error");
+      websocket_emit_simple(ws, "error", "onerror");
       ant_conn_close(conn);
       return;
     }
@@ -722,7 +833,7 @@ void ant_websocket_server_on_read(ant_t *js, ant_value_t socket_obj, ant_conn_t 
         if (frame.rsv1) {
           uint8_t *inflated = NULL;
           size_t inflated_len = 0;
-          if (!websocket_inflate_message(frame.payload, frame.payload_len, ws->max_payload_len, &inflated, &inflated_len))
+          if (!websocket_inflate_message(ws, frame.payload, frame.payload_len, ws->max_payload_len, &inflated, &inflated_len))
             goto l_protocol_error;
           websocket_emit_message(ws, inflated, inflated_len, frame.opcode == ANT_WS_OPCODE_BINARY);
           free(inflated);
@@ -744,12 +855,12 @@ void ant_websocket_server_on_read(ant_t *js, ant_value_t socket_obj, ant_conn_t 
         if (ws->fragment_compressed) {
           uint8_t *inflated = NULL;
           size_t inflated_len = 0;
-          if (!websocket_inflate_message(ws->fragment_buf, ws->fragment_len, ws->max_payload_len, &inflated, &inflated_len))
+          if (!websocket_inflate_message(ws, ws->fragment_buf, ws->fragment_len, ws->max_payload_len, &inflated, &inflated_len))
             goto l_protocol_error;
           websocket_emit_message(ws, inflated, inflated_len, ws->fragment_opcode == ANT_WS_OPCODE_BINARY);
           free(inflated);
         } else websocket_emit_message(ws, ws->fragment_buf, ws->fragment_len, ws->fragment_opcode == ANT_WS_OPCODE_BINARY);
-        websocket_fragment_clear(ws);
+        websocket_fragment_reset(ws);
       }
       goto l_done;
 
@@ -781,7 +892,7 @@ void ant_websocket_server_on_read(ant_t *js, ant_value_t socket_obj, ant_conn_t 
     }
 
     l_protocol_error:
-      websocket_emit_simple(ws, "error");
+      websocket_emit_simple(ws, "error", "onerror");
       ant_ws_frame_clear(&frame);
       ant_conn_close(conn);
       return;
@@ -813,6 +924,13 @@ void init_websocket_module(ant_t *js) {
   if (is_object_type(eventtarget_proto)) js_set_proto_init(js->builtins.websocket_proto, eventtarget_proto);
   js_set(js, js->builtins.websocket_proto, "send", js_mkfun(js_websocket_send));
   js_set(js, js->builtins.websocket_proto, "close", js_mkfun(js_websocket_close));
+  
+  js_set_accessor_desc(
+    js, js->builtins.websocket_proto, "binaryType", 10,
+    js_mkfun(js_websocket_get_binary_type), js_mkfun(js_websocket_set_binary_type),
+    JS_DESC_E | JS_DESC_C
+  );
+  
   js_set(js, js->builtins.websocket_proto, "CONNECTING", js_mknum(WS_CONNECTING));
   js_set(js, js->builtins.websocket_proto, "OPEN", js_mknum(WS_OPEN));
   js_set(js, js->builtins.websocket_proto, "CLOSING", js_mknum(WS_CLOSING));

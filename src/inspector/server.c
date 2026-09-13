@@ -16,10 +16,9 @@ static void inspector_process_ws(inspector_client_t *client) {
   for (;;) {
     ant_ws_frame_t frame = {0};
     ant_ws_frame_result_t r = ant_ws_parse_frame(
-      (const uint8_t *)client->read_buf,
+      (uint8_t *)client->read_buf,
       client->read_len,
-      true,
-      false,
+      true, false, false,
       &frame
     );
     if (r == ANT_WS_FRAME_INCOMPLETE) return;
