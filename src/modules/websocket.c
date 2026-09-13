@@ -322,7 +322,7 @@ static void websocket_emit_event(websocket_state_t *ws, int idx, ant_value_t eve
   ant_value_t listener = ws->handler_listeners[idx];
 
   if (count == 1 && is_callable(listener)) {
-    ant_value_t handler = js_get(js, js_get_slot(listener, SLOT_DATA), "handler");
+    ant_value_t handler = js_get_slot(listener, SLOT_DATA);
     if (!is_callable(handler)) return;
     
     if (templated) {
@@ -368,16 +368,14 @@ static void websocket_emit_simple(websocket_state_t *ws, int idx) {
 }
 
 static ant_value_t websocket_handler_listener(ant_params_t) {
-  ant_value_t payload = js_get_slot(js->current_func, SLOT_DATA);
-  ant_value_t handler = is_object_type(payload) ? js_get(js, payload, "handler") : js_mkundef();
+  ant_value_t handler = js_get_slot(js->current_func, SLOT_DATA);
   if (!is_callable(handler)) return js_mkundef();
   return websocket_call(js, handler, js_getthis(js), args, nargs);
 }
 
-static ant_value_t websocket_get_handler(ant_t *js, websocket_state_t *ws, int idx) {
+static ant_value_t websocket_get_handler(websocket_state_t *ws, int idx) {
   ant_value_t listener = ws->handler_listeners[idx];
-  if (!is_callable(listener)) return js_mknull();
-  return js_get(js, js_get_slot(listener, SLOT_DATA), "handler");
+  return is_callable(listener) ? js_get_slot(listener, SLOT_DATA) : js_mknull();
 }
 
 static ant_value_t websocket_set_handler(ant_t *js, websocket_state_t *ws, int idx, ant_value_t value) {
@@ -394,22 +392,18 @@ static ant_value_t websocket_set_handler(ant_t *js, websocket_state_t *ws, int i
   }
 
   if (registered) {
-    js_set(js, js_get_slot(listener, SLOT_DATA), "handler", value);
+    js_set_slot_wb(js, listener, SLOT_DATA, value);
     return js_mkundef();
   }
 
   GC_ROOT_SAVE(mark, js);
   GC_ROOT_PIN(js, value);
-  ant_value_t payload = js_mkobj(js);
-  if (is_err(payload)) { GC_ROOT_RESTORE(js, mark); return payload; }
-  
-  GC_ROOT_PIN(js, payload);
-  js_set(js, payload, "handler", value);
-  listener = js_heavy_mkfun(js, websocket_handler_listener, payload);
+  listener = js_heavy_mkfun(js, websocket_handler_listener, value);
   
   if (is_err(listener)) { GC_ROOT_RESTORE(js, mark); return listener; }
   GC_ROOT_PIN(js, listener);
   eventemitter_add_listener(js, ws->obj, type, listener, false);
+  
   ws->handler_listeners[idx] = listener;
   GC_ROOT_RESTORE(js, mark);
   
@@ -420,7 +414,7 @@ static ant_value_t websocket_set_handler(ant_t *js, websocket_state_t *ws, int i
   static ant_value_t js_websocket_get_##name(ant_params_t) { \
     websocket_state_t *ws = websocket_data(js_getthis(js)); \
     if (!ws) return js_mkerr_typed(js, JS_ERR_TYPE, "Invalid WebSocket"); \
-    return websocket_get_handler(js, ws, idx); \
+    return websocket_get_handler(ws, idx); \
   } \
   static ant_value_t js_websocket_set_##name(ant_params_t) { \
     websocket_state_t *ws = websocket_data(js_getthis(js)); \
