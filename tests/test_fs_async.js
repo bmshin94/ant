@@ -1,58 +1,61 @@
-import { readFile, writeFile, unlink, mkdir, rmdir, stat } from 'ant:fs';
+import assert from 'node:assert';
+import { readFile, writeFile, unlink, mkdir, rmdir, stat, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-console.log('Testing ant:fs with async/await...\n');
+console.log('Testing node:fs/promises with async/await...\n');
+
+async function assertMissing(filePath) {
+  try {
+    await stat(filePath);
+  } catch (error) {
+    assert.strictEqual(error.code, 'ENOENT');
+    return;
+  }
+  assert.fail(`Expected ${filePath} to be removed`);
+}
 
 async function testFs() {
-  const testDir = 'tests/.fs_test_tmp';
-  const testFile = testDir + '/async_test.txt';
+  const tmpRoot = await mkdtemp(join(tmpdir(), 'ant-fs-async-'));
+  const testDir = join(tmpRoot, 'nested');
+  const testFile = join(testDir, 'async_test.txt');
   const testData = 'Hello from async ant:fs!';
 
   try {
-    // Test mkdir
     console.log('=== Test: mkdir ===');
-    try {
-      await mkdir(testDir);
-      console.log('✓ Directory created');
-    } catch (e) {
-      console.log('Directory might exist, continuing...');
-    }
+    await mkdir(testDir);
+    const dirStats = await stat(testDir);
+    assert.strictEqual(dirStats.isDirectory(), true);
+    assert.strictEqual(dirStats.isFile(), false);
 
-    // Test writeFile
     console.log('\n=== Test: writeFile ===');
     await writeFile(testFile, testData);
-    console.log('✓ File written');
 
-    // Test readFile
     console.log('\n=== Test: readFile ===');
     const content = await readFile(testFile);
-    console.log('✓ File read, length:', content.length);
-    if (content === testData) {
-      console.log('✓ Content matches!');
-    } else {
-      console.log('✗ Content mismatch!');
-    }
+    assert.ok(Buffer.isBuffer(content));
+    assert.strictEqual(content.toString('utf8'), testData);
+    assert.strictEqual(await readFile(testFile, 'utf8'), testData);
 
-    // Test stat
     console.log('\n=== Test: stat ===');
     const stats = await stat(testFile);
-    console.log('✓ File stats:');
-    console.log('  Size:', stats.size);
-    console.log('  Is file:', stats.isFile);
-    console.log('  Is directory:', stats.isDirectory);
+    assert.strictEqual(stats.size, Buffer.byteLength(testData));
+    assert.strictEqual(stats.isFile(), true);
+    assert.strictEqual(stats.isDirectory(), false);
 
-    // Cleanup
-    console.log('\n=== Cleanup ===');
+    console.log('\n=== Test: unlink and rmdir ===');
     await unlink(testFile);
-    console.log('✓ File deleted');
-    
+    await assertMissing(testFile);
     await rmdir(testDir);
-    console.log('✓ Directory deleted');
-
-    console.log('\n✓✓✓ All tests passed! ✓✓✓');
-  } catch (error) {
-    console.error('\n✗ Test failed:', error);
+    await assertMissing(testDir);
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
   }
+
+  console.log('\nAll async filesystem tests passed!');
 }
 
-// Run the async function
-testFs();
+testFs().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

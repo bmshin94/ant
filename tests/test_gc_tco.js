@@ -8,9 +8,9 @@ function __gcPerfLog() {
   console.log(`[perf] runtime: ${(__gcPerfNow() - __gcPerfStart).toFixed(2)}ms`);
 }
 
-// Stress test: GC compaction during tail-call optimization
-// Verifies that tc.func, tc.closure_scope, and tc.args[] are properly
-// rooted so GC compaction doesn't corrupt them mid-trampoline.
+// Stress test: tail calls under live heap pressure.
+// Checks that heap arguments and captured values survive tail calls while
+// retaining allocation pressure. Collection timing is controlled by the runtime.
 
 console.log('=== GC + Tail Call Stress Test ===\n');
 
@@ -28,22 +28,24 @@ function assert(cond, msg) {
   }
 }
 
-function inflateArena() {
+function inflateHeap() {
   let junk = [];
   for (let i = 0; i < 40000; i++) {
     junk.push({ idx: i, payload: 'padding_string_' + i + '_extra_data_to_bulk_up_the_arena_size' });
   }
-  let used = Ant.stats().arenaUsed;
-  assert(used >= 10 * 1024 * 1024, 'arena should be >= 10MB, got ' + fmt(used));
-  console.log('  Arena inflated to', fmt(used));
+  const stats = Ant.stats();
+  const used = stats.pools.totalUsed + stats.alloc.total;
+  assert(Number.isFinite(used) && used >= 10 * 1024 * 1024,
+    'heap should be >= 10MB, got ' + fmt(used));
+  console.log('  Heap inflated to', fmt(used));
   return junk;
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: Tail recursion passing heap objects as args, GC between iterations
+// Test 1: Tail recursion passing heap objects as args under heap pressure
 // ---------------------------------------------------------------------------
-console.log('Test 1: Tail-call args survive GC compaction');
-let _garbage = inflateArena();
+console.log('Test 1: Tail-call args survive heap pressure');
+let _garbage = inflateHeap();
 
 function tailWithObjects(n, obj) {
   if (n <= 0) return obj;
@@ -69,7 +71,7 @@ console.log('  Object args through tail calls: OK\n');
 // Test 2: Mutual tail recursion with string args + GC pressure
 // ---------------------------------------------------------------------------
 console.log('Test 2: Mutual tail recursion with string args + GC');
-_garbage = inflateArena();
+_garbage = inflateHeap();
 
 function pingStr(n, s) {
   if (n <= 0) return s;
@@ -89,7 +91,7 @@ console.log('  Mutual tail recursion with strings: OK\n');
 // Test 3: Closure scope survives GC during tail calls
 // ---------------------------------------------------------------------------
 console.log('Test 3: Closure scope survives GC during tail calls');
-_garbage = inflateArena();
+_garbage = inflateHeap();
 
 function makeAccumulator() {
   let captured = { sum: 0 };
@@ -109,7 +111,7 @@ console.log('  Closure scope through tail calls: OK\n');
 // Test 4: Multi-arg tail calls with mixed heap types + GC
 // ---------------------------------------------------------------------------
 console.log('Test 4: Multi-arg tail calls with mixed types + GC');
-_garbage = inflateArena();
+_garbage = inflateHeap();
 
 function multiArg(n, arr, obj, str) {
   if (n <= 0) return { arr, obj, str };
@@ -124,10 +126,10 @@ assert(result4.str.length === 100, 'string should have 100 chars, got ' + result
 console.log('  Multi-arg mixed types: OK\n');
 
 // ---------------------------------------------------------------------------
-// Test 5: Deep tail recursion with GC every N iterations
+// Test 5: Deep tail recursion under heap pressure
 // ---------------------------------------------------------------------------
-console.log('Test 5: Deep tail recursion (50k) with periodic GC');
-_garbage = inflateArena();
+console.log('Test 5: Deep tail recursion (50k) under heap pressure');
+_garbage = inflateHeap();
 
 function deepTail(n, acc) {
   if (n <= 0) return acc;
@@ -136,13 +138,13 @@ function deepTail(n, acc) {
 
 let result5 = deepTail(50000, 0);
 assert(result5 === 50000, 'deepTail should return 50000, got ' + result5);
-console.log('  Deep tail recursion with periodic GC: OK\n');
+console.log('  Deep tail recursion under heap pressure: OK\n');
 
 // ---------------------------------------------------------------------------
 // Test 6: Tail call where callee is a different function (not self-recursion)
 // ---------------------------------------------------------------------------
 console.log('Test 6: Tail call to different functions + GC');
-_garbage = inflateArena();
+_garbage = inflateHeap();
 
 function step1(n, data) {
   if (n <= 0) return data;
@@ -170,7 +172,7 @@ console.log('  Cross-function tail calls: OK\n');
 // Test 7: Array args allocated fresh each iteration + GC
 // ---------------------------------------------------------------------------
 console.log('Test 7: Fresh array allocation per tail-call iteration + GC');
-_garbage = inflateArena();
+_garbage = inflateHeap();
 
 function freshArrays(n, results) {
   if (n <= 0) return results;
@@ -198,3 +200,4 @@ if (failures === 0) {
   console.log('Failures:', failures);
 }
 __gcPerfLog();
+if (failures > 0) process.exit(1);

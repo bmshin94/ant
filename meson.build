@@ -460,15 +460,17 @@ if darwin_hvf_supported
   )
 
   executable(
-    'test-sandbox-9p',
-    files('tests/test_sandbox_9p.c'),
+    'test-sandbox-vsock-queue',
+    files('tests/test_sandbox_vsock_queue.c'),
     dependencies: libant_dep,
     build_by_default: false
   )
+endif
 
+if darwin_hvf_supported or host_machine.system() == 'linux'
   executable(
-    'test-sandbox-vsock-queue',
-    files('tests/test_sandbox_vsock_queue.c'),
+    'test-sandbox-9p',
+    files('tests/test_sandbox_9p.c'),
     dependencies: libant_dep,
     build_by_default: false
   )

@@ -1,99 +1,166 @@
 # Test Sweep 2026-09-07
 
 Status: active
-Last reviewed: 2026-09-07
+Last reviewed: 2026-09-13
 Owner: theMackabu
 
-Results of running every `tests/test_*` file, the JIT harness, the spec suite,
-the Node differential runner, and `maid preflight`. The first pass ran against
-`13e340d5`; the recorded full-sweep numbers are from the working-tree build
-at `87077b56` plus the constructor-context implementation later committed in
-`87c85b9c`. Subsequent focused validation is recorded in the completed plans;
-these totals are not a fresh sweep of HEAD. The v14 comparison uses the
-`v14.0.ff84a70d.0` release binary from 2026-08-17. Note that v14 is only
-useful for tests that existed unchanged at that tag; see the native addon row.
+Latest full rerun: 2026-09-13 against the clean source tree at
+`b1beeac2890237d112e5f07eb0f4f06853ce037d`. This supersedes the September 7
+acceptance totals. No runtime or test sources were changed during this rerun.
+The remaining work is the differential gaps and three stale test checks below.
 
-## Recorded totals
+## Current totals
 
 | Suite | Result |
 | --- | --- |
-| `tests/test_*` (569 files) | 563 pass, 2 fail, 3 exit non-zero by design, 1 expected timeout |
+| JavaScript `tests/test_*` (628 files) | 618 clean passes, 3 stale checks that print failures but exit 0, 3 platform skips, 3 intentional non-zero exits, 1 expected timeout |
+| Native `tests/test_*.c` (19 files) | 18 pass; 1 Linux-only test not run on macOS |
 | JIT harness (`examples/jit/run.js`) | 10 of 10 files pass |
-| Spec suite (`examples/spec/run.js --all`) | 4221 tests, 102 files, 0 failures |
-| Differential runner (`--cases 5 --seed 44`) | 11 of 25 probes mismatch, all pre-existing |
-| `maid preflight` | knowledge and structure checks pass |
+| Spec suite (`examples/spec/run.js --all`) | 4229 tests, 102 files, 0 failures |
+| Differential runner (`--cases 5 --seed 44`) | 14 of 25 probes match; 11 mismatch |
+| Differential runner unit checks | pass |
+| `maid preflight` and recommended `maid knowledge` | knowledge and structure checks pass |
 
-## Resolved during the sweep
+The JavaScript process-status totals are **624 exit 0, 3 intentional non-zero
+exits, 1 expected timeout, and no unexpected non-zero exits or timeouts**.
+The 624 includes the three skips and three stale-check files; those six are
+separated from clean passes above. Counts describe whole files, including
+sample/helper files, rather than individual assertions. There are 52 more
+JavaScript files than in the September 7 evening sweep.
 
-| Test | Cause | Fix |
-| --- | --- | --- |
-| `test_jit_for_of.cjs` | PR #95 broke integer-range locals across an OSR bailout resume; the nested for-of case returned 1065 instead of 2166. | Repaired in 0bcab93b. The case moved to `examples/jit/bailout_resume.js` so the harness catches it. |
-| `test_websocket_client_buffered_frames.cjs` | `new.target` lived in one global slot on `ant_t`, so the WebSocket constructor's target leaked into the native accept callback. `net_socket_create` built the accepted socket with the WebSocket prototype and the connection listener got an object with no `.on`. The `module.exports` data-property change exposed the leak by removing an incidental getter call that cleared the slot. | JS/JIT frames now carry invocation state, and native callbacks receive explicit `call_new_target` through `ant_params_t`. Native constructor frames only root targets for GC; the native accept callback explicitly selects the default Socket prototype. Committed in `87c85b9c`, including `tests/test_new_target_frames.cjs`; header and internal-call follow-ups landed in `1bfe480e` and `a7b0be86`. See the [completed constructor-context plan](../completed/net-connection-websocket-arg-regression.md). |
-| `test_cli_file_arg_precedes_package_script.cjs` | `ant t.js` ran the package script named `t.js` instead of the file. | `src/main.c` skips the script shortcut when the positional names an existing regular file. Committed in 87077b56. |
-| `test_console_inspect_string_internals.cjs` | Stale. PR #90 raised `STR_SHORT_CONS_THRESHOLD` from 13 to 32, so the 13-char concat now copies flat by design. | Rope case uses two 16-char strings. Committed in 87077b56. |
-| `test_repl_static_import.cjs` | Stale. Since 671d8071 the prompt is dim `❯`, a reset escape, then a space, so the pty driver's literal `❯ ` marker never matched and it killed the REPL at its deadline. | Driver matches the prompt with SGR escapes allowed. Committed in 87077b56. |
-| `test_debug_error_trace.cjs` | Stale from birth. The `ANT_DEBUG=dump/errors:trace` channel and `[ant-debug:error]` marker never existed outside the commit that added the test. | Removed in 87077b56. |
-| `test_ffi_wrappers.cjs`, `test_rpc.cjs` | Stale. ESM `import` syntax in `.cjs` files. | Renamed to `.mjs` in fe9904d6. |
+## Build and sweep method
 
-## Unresolved at the sweep checkpoint, now fixed
+- Host: macOS 27.0, arm64; Node `v26.8.1`; configured Clang `21.1.8` build.
+- Configuration: release, optimization 3, LTO and PGO enabled, system
+  allocator, Temporal enabled, no sanitizer.
+- `meson compile -C build` and `meson compile -C build ant-runtime` both
+  completed with no work to do. The existing configured version metadata is
+  `15.1.0c62ef72.0`; it was not refreshed to the source HEAD. The exact tested
+  binaries are identified below, and their hashes were unchanged after testing.
+- Run every top-level `tests/test_*` file with extension `.js`, `.cjs`, or
+  `.mjs` using the absolute `build/ant` path, from the repository root, six
+  workers, 90 seconds per file, and stdin closed. Prepend `build/` to `PATH`
+  so child commands resolving `ant` use this build. Capture combined stdout
+  and stderr per file; kill the test process group at the timeout.
+- Run the JIT harness, full spec suite, and differential commands after the
+  JavaScript file sweep. Review failure/skip output as well as exit status,
+  and rerun the three suspicious exit-zero files individually.
+- Run `meson test -C build --print-errorlogs`: all six registered Ant C tests
+  and the additional vendored zlib-ng example pass. Build and run the ten
+  other configured `test-*` targets for listener accept, WebSocket cancellation,
+  HTTP protocols, and the seven sandbox tests. Compile the two unregistered
+  cage-allocator and object-absence-guard tests using the configured
+  HTTP-protocol test's compiler/linker flags and `libant.a`, with `-UNDEBUG`;
+  both pass. `test_native_stack_limits.c` requires Linux's
+  `pthread_getattr_np` and is excluded on this host.
 
-Both were open when the totals above were recorded. Both are fixed in the
-working tree as of 2026-09-07 evening; the fresh-sweep section below records
-the rerun.
+Tested SHA-256 values:
 
-| Test | Cause | Fix |
-| --- | --- | --- |
-| `test_compile_native_addon.cjs` | **Regression from PR #96.** `require()` pre-creates the module object in `js_esm_import_sync_cstr_from_require` keyed on the resolver's virtual `/$ant/...` path. `esm_load_commonjs_module` then read `__dirname` and `__filename` from that pending object instead of from its `module_path` argument, which is the real materialized directory, and nothing rewrote them. Inside a materialized native package the fixture spawned its helper at the virtual path and got exit 127 with empty stderr, reported as "helper failed". `require.resolve` was unaffected because it already maps through `ant_bundle_materialized_path` (`loader.c:2504`). The earlier "pre-existing, fails on v14" verdict was wrong: the test and fixture were rewritten after v14, so v14 fails on assertions that did not exist when it was built. | Fixed at the source in `js_esm_import_sync_cstr_from_require` (`src/esm/loader.c`): the pre-created module object is now built from the registered module record's `resolved_path`, which is the real materialized file, while the require cache and module key keep the virtual path. That makes `filename`, `path`, and `paths` consistent from creation instead of patching them at load time. Six lines, uncommitted. Passes three runs in a row; spec suite and every `test_*require*`, `test_cjs_*`, `test_module_*`, `test_compile_*`, `test_esm_*`, `test_import_*` file pass on the rebuilt binary. The test silently skips when `build/ant-runtime` is missing, so build it with `meson compile -C build ant-runtime` before trusting a pass. |
-| `test_eval.cjs` | Engine gap: sloppy-mode direct eval did not leak `var` or function declarations into the caller's scope. Node 26 and Bun 1.4.0 leak both. | Fixed in the working tree; the spec-faithful test from fe9904d6 passes. |
+```text
+build/ant          cfe5ca752b64c868b736967202d746e4542f1a88db2a625cec8c4befcbf7f9b4
+build/ant-runtime  a7af98190d98ca0bf94564e3e3c998e9f5d5eaee18d77a9e0c9c161dd7fb62e8
+```
 
-## Fresh sweep after the fixes
+Local evidence is under `/tmp/ant-test-sweep-2026-09-13/`: `metadata.json`,
+`run_sweep.py`, raw `tests.json`, classified `tests-reviewed.json`, per-file
+`tests/*.log`, `suites.json`, `suites/*.log`, `rechecks.json`, and native build
+and run logs with `run_native.py`. These are temporary local artifacts, not
+versioned acceptance evidence; the durable results are recorded here.
 
-Run on 2026-09-07 evening against the working-tree build at `828a9b2f` with
-the uncommitted loader fix for the native addon test. Same runner, 90s per
-file, six in parallel. Seven test files were added between the checkpoint
-and this run.
+The differential commands were:
 
-| Suite | Result |
+```sh
+node tests/differential/runner.mjs --ant ./build/ant --cases 5 --seed 44 --json --output /tmp/ant-test-sweep-2026-09-13/differential-output
+node tests/differential/test.mjs
+```
+
+## Stale checks that still exit zero
+
+All three messages reproduce when run individually. They are test-maintenance
+issues, not evidence of a new runtime regression. They must not be silently
+counted as clean passes merely because the process exits zero.
+
+| File | Observed output and classification |
 | --- | --- |
-| `tests/test_*` (576 files) | 572 pass, 0 fail, 3 exit non-zero by design, 1 expected timeout |
-| Spec suite (`examples/spec/run.js --all`) | 4221 tests, 102 files, 0 failures |
-| Module, require, compile, esm, import test families | all pass |
+| `test_fs_async.js` | Prints `✗ Content mismatch!` and then `All tests passed!`. It compares `readFile()` without an encoding directly to a string. A focused probe confirms that the result is a Buffer with the expected contents; strict comparison to a string is false. The sample also prints `stats.isFile` and `stats.isDirectory` as properties instead of calling the methods. |
+| `test_define_property_edge_cases.js` | Test 6 prints `FAIL: Should have thrown error` for defining an own `__proto__` property. Node `v26.8.1` produces the same message on this unchanged test: the expectation that this definition throws is incorrect. |
+| `test_gc_tco.js` | Prints seven arena-size failures and `Failures: 7`, then exits zero. It reads `Ant.stats().arenaUsed`, which is undefined in the current stats API, so every arena-size check gets `NaN MB`. Its tail-call result checks pass, but the intended allocation-pressure checks are not valid. |
 
-The only non-passing files are the three by-design exits and the GC stress
-loop listed below.
+Follow-up: update these checks for the current contracts and make actual
+assertion failures produce a non-zero exit. No test changes are included in
+this documentation update.
 
-## Exit non-zero by design, 3
+## Expected exits, timeout, and platform skips
 
-These are not failures. They are sample sources whose whole point is the
-non-zero exit, so any sweep that treats exit status as pass/fail will list
-them. Do not fix or remove them; skip them when counting.
+These three intentional non-zero exits remain sample behavior. Do not fix or
+remove them to make an exit-status sweep green.
 
 | Test | Why it exits non-zero |
 | --- | --- |
-| `test_highlight_long_strings.js` | Throws after three long string lines so the syntax highlighter can be eyeballed near the terminal edge. |
+| `test_highlight_long_strings.js` | Throws after three long string lines so the syntax highlighter can be inspected near the terminal edge. |
 | `test_throw_stack.cjs` | Throws a string through three nested frames to show the stack trace format. |
 | `test_with_strict.cjs` | Expects the SyntaxError for a `with` statement under `"use strict"`. |
 
-## Expected timeout, 1
+`test_gc_stress10.js` remains an open-ended stress loop. It was still rendering
+at the 90-second cutoff (frame 814 at 89.88 seconds; last reported RSS 26.4 MB).
+This is the expected timeout, not a completed stress test or a long-term memory
+stability claim.
 
-- `test_gc_stress10.js`. Not a failure. It is an open-ended TUI stress loop
-  still rendering frames at the 90s cutoff with stable memory. Any per-file
-  timeout will cut it off; that is the expected result.
+The three JavaScript platform skips are `test_ant_cron_linux.cjs`,
+`test_ant_cron_windows.cjs`, and `test_fs_mkdir_recursive_windows.cjs`.
+`ant-runtime` was present: `test_compile_basic.cjs` and
+`test_compile_native_addon.cjs` completed without taking their missing-runtime
+skip paths. `test_eval.cjs`, `test_jit_for_of.cjs`, and
+`test_websocket_client_buffered_frames.cjs` also pass.
 
 ## Differential runner mismatches
 
-All 11 also mismatch on v14, so none are recent. v14 had 16; the five `path`
-mismatches were fixed by the path port.
+The mismatching probe IDs are unchanged from the September 7 record. All
+probes complete without an engine error or timeout; the runner exits 1 because
+of output differences. All five Promise-timing and all five path probes match.
 
-- `regexp` 0 to 4: empty regex `source` returns `""` instead of `"(?:)"`,
-  `$<name>` replacement patterns are left literal, and replacing with lone
-  surrogates yields U+FFFD.
-- `property` 1 and 4: `JSON.stringify` drops keys containing a NUL byte.
-  Property get, has, and descriptor agree with Node, so this is a JSON gap.
-- `stream-shape` 1 to 4: covered by the stream property surface plan.
+| Probes | Current difference from Node |
+| --- | --- |
+| `regexp-0` through `regexp-4` | Empty-pattern `source` is still `""` in the affected cases instead of `"(?:)"`; named `$<m>` replacements remain literal; empty global replacement on an astral character produces replacement characters instead of preserving UTF-16 surrogate halves. |
+| `property-1`, `property-4` | `JSON.stringify` omits the property whose key contains a NUL byte. Get, has, descriptor, and key enumeration agree with Node. |
+| `stream-shape-1` | Readable `destroyed` is an own property instead of Node's prototype getter/setter. |
+| `stream-shape-2`, `stream-shape-3` | Writable `writableObjectMode` and its prototype descriptor are absent. |
+| `stream-shape-4` | Writable `writable` has a different prototype descriptor, including configurability and setter presence. |
 
-## CI note
+The stream differences have a separate [stream property surface plan](stream-property-surface.md).
+The earlier sweep classified all 11 as pre-existing using release
+`v14.0.ff84a70d.0` (2026-08-17); that old binary was **not rerun** here. Matching
+probe IDs support continuity with the prior findings, not a fresh historical
+A/B comparison. The v14 comparison is only valid for tests unchanged at its
+tag; it was not valid for the rewritten native-addon fixture below.
 
-The `build-platform` workflow only runs the cron and upgrade tests. Nothing
-else under `tests/`, the JIT harness, or the spec suite runs in CI, which is
-how the PR #95 and PR #96 regressions reached master green.
+## September 7 history
+
+The initial pass used `13e340d5`. The first recorded full checkpoint used
+`87077b56` plus the constructor-context implementation later committed in
+`87c85b9c`: 569 JavaScript files, 563 passes, 2 failures, 3 intentional exits,
+and 1 expected timeout. The evening rerun at `828a9b2f` plus the then-uncommitted
+loader fix recorded 576 files, 572 passes, no unexpected failures, 3 intentional
+exits, and 1 expected timeout. Both recorded 4221 specs across 102 files.
+These historical pass totals used process status and did not separately
+classify the stale exit-zero checks identified above.
+
+| Resolved test or issue | Cause and resolution |
+| --- | --- |
+| `test_jit_for_of.cjs` | PR #95 broke integer-range locals across an OSR bailout resume; the nested for-of case returned 1065 instead of 2166. Fixed in `0bcab93b`; the case also moved into `examples/jit/bailout_resume.js` for harness coverage. |
+| `test_websocket_client_buffered_frames.cjs` | Global `new.target` leaked from the WebSocket constructor into a native accept callback, producing a Socket with the WebSocket prototype and no `.on`. A `module.exports` data-property change exposed the leak by removing an incidental getter call that cleared the slot. Invocation state moved into JS/JIT frames; native callbacks receive `call_new_target`, native constructor frames root targets for GC, and accept explicitly selects the Socket prototype. Fixed in `87c85b9c`, with follow-ups in `1bfe480e` and `a7b0be86`; see the [constructor-context plan](../completed/net-connection-websocket-arg-regression.md). |
+| `test_compile_native_addon.cjs` | PR #96 pre-created a CommonJS module using virtual `/$ant/...` metadata, which the materialized loader reused for `__dirname` and `__filename`; its helper then exited 127 at the virtual path. The fix creates metadata from the registered module record's real `resolved_path` while retaining virtual require-cache/module keys. `require.resolve` already mapped the materialized path. The original claim that this was pre-existing because it failed on v14 was wrong: the fixture had been rewritten after v14. Always build `ant-runtime` before trusting this test's pass. |
+| `test_eval.cjs` | Sloppy direct eval did not leak `var` or function declarations into the caller. The implementation fix made the spec-faithful test from `fe9904d6` pass. |
+| CLI file versus package script | `ant t.js` chose the package script even when `t.js` was a regular file. `87077b56` skips the script shortcut for an existing regular file. |
+| Console rope and REPL tests | `87077b56` adjusted the rope fixture to the 32-character short-concat threshold introduced by PR #90 and allowed SGR escapes in the REPL prompt marker introduced by `671d8071`. |
+| Obsolete debug channel and ESM fixtures | `87077b56` removed a test for the nonexistent `ANT_DEBUG=dump/errors:trace` channel; `fe9904d6` renamed the ESM-syntax FFI and RPC fixtures from `.cjs` to `.mjs`. |
+
+The longer original checkpoint narrative is recoverable from this file at
+`b1beeac2` before the September 13 document refresh.
+
+## CI coverage
+
+The current `build-platform` workflow runs selected cron/platform, upgrade,
+native-stack, compile, and Temporal checks. It still does not run the complete
+`tests/test_*` sweep, the JIT harness, or `examples/spec/run.js --all`.
+The earlier statement that it ran only cron and upgrade tests is superseded.
