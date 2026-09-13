@@ -42,7 +42,7 @@ do
   fi
 done
 if [ -z "$LLVM_PROFDATA" ]; then
-  echo "error: llvm-profdata not found (install Xcode CLT or add llvm to PATH)" >&2
+  echo "error: llvm-profdata not found" >&2
   exit 1
 fi
 

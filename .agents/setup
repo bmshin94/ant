@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tool_root="$HOME/.local/share/ant-orb"
 tool_bin="$tool_root/bin"
 env_file="$tool_root/env"
-profile="$HOME/.bash_profile"
+profiles=("$HOME/.bash_profile" "$HOME/.bashrc")
 
 step_started=0
 step_name=""
@@ -189,16 +189,18 @@ ln -sfn "$zig_dir/zig" "$tool_bin/zig"
 ln -sfn "$(command -v "llvm-profdata-$llvm_version")" "$tool_bin/llvm-profdata"
 
 profile_marker="# Ant orb toolchain"
-if grep -Fqx "$profile_marker" "$profile" 2>/dev/null; then
-  sed -i '/^# Ant orb toolchain$/,+3d' "$profile"
-fi
-cat >> "$profile" <<EOF
+for profile in "${profiles[@]}"; do
+  if grep -Fqx "$profile_marker" "$profile" 2>/dev/null; then
+    sed -i '/^# Ant orb toolchain$/,+3d' "$profile"
+  fi
+  cat >> "$profile" <<EOF
 
 $profile_marker
 if [[ "\${PWD:-}" == "$repo_root" || "\${PWD:-}" == "$repo_root/"* ]]; then
   source "$env_file"
 fi
 EOF
+done
 
 # Make the toolchain available to the remainder of this setup run.
 # shellcheck disable=SC1090
