@@ -1,4 +1,27 @@
 const assert = require('assert');
+
+if (process.platform !== 'win32') {
+  const faultingEntry = Ant.unsafe.c({ entry: 'fault', args: [], returns: 'int' })`
+    int fault(void) {
+      *(volatile int *)1 = 1;
+      return 0;
+    }
+  `;
+  assert.throws(
+    () => faultingEntry(),
+    /Ant\.unsafe\.c\(\) entry "fault" faulted with signal \d+ at address 0x1/,
+  );
+
+  assert.throws(
+    () => Ant.unsafe.c`
+      #include <stdlib.h>
+      int main(void) {
+        abort();
+      }
+    `,
+    /Ant\.unsafe\.c\(\) entry "main" aborted with signal \d+/,
+  );
+}
 const { spawnSync } = require('child_process');
 
 function runRejectedEntry(source) {

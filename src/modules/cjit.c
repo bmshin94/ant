@@ -6,12 +6,15 @@
 #include <ffi.h>
 #include <math.h>
 #include <stdint.h>
+#include <inttypes.h>
+#include <signal.h>
 
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
 
 #include "ant.h"
+#include "crash.h"
 #include "gc/roots.h"
 #include "ptr.h"
 #include "internal.h"
@@ -102,6 +105,13 @@ typedef struct {
   size_t arg_count;
   char *entry_name;
 } ant_c_function_t;
+
+typedef struct {
+  ffi_cif *cif;
+  void (*entry)(void);
+  void *result;
+  void **args;
+} ant_c_ffi_call_t;
 
 static const ant_c_arg_mapping_t ANT_C_ARG_MAPPINGS[] = {
   {"int8",   ANT_C_ARG_INT8,   &ffi_type_sint8,  MIR_T_I8},
@@ -475,6 +485,33 @@ static ant_value_t ant_c_result_to_js(
   return js_mkerr(js, "Ant.unsafe.c() has an unsupported return type");
 }
 
+static void ant_c_invoke_ffi(void *context) {
+  ant_c_ffi_call_t *call = context;
+  ffi_call(call->cif, call->entry, call->result, call->args);
+}
+
+static ant_value_t ant_c_native_fault(
+  ant_t *js, const char *entry_name, int signal_number, uintptr_t fault_address
+) {
+  if (signal_number == SIGABRT) return js_mkerr(
+    js, "Ant.unsafe.c() entry \"%s\" aborted with signal %d",
+    entry_name, signal_number
+  );
+
+  return js_mkerr(js,
+    "Ant.unsafe.c() entry \"%s\" faulted with signal %d at address 0x%" PRIxPTR,
+    entry_name, signal_number, fault_address
+  );
+}
+
+static int ant_c_call_ffi_guarded(
+  ffi_cif *cif, void (*entry)(void), void *result, void **args,
+  uintptr_t *fault_address
+) {
+  ant_c_ffi_call_t call = { .cif = cif, .entry = entry, .result = result, .args = args };
+  return ant_crash_guard_native_call(ant_c_invoke_ffi, &call, fault_address);
+}
+
 static void ant_c_function_destroy(ant_c_function_t *function) {
   if (!function) return;
   MIR_gen_finish(function->ctx);
@@ -588,12 +625,14 @@ static ant_value_t ant_c_function_call(ant_params_t) {
   }
 
   ant_c_arg_value_t result = {0};
-  
-  ffi_call(
+  uintptr_t fault_address = 0;
+
+  int signal_number = ant_c_call_ffi_guarded(
     &function->cif, function->entry_item->addr, &result,
-    function->arg_count == 0 ? NULL : ffi_args
+    function->arg_count == 0 ? NULL : ffi_args, &fault_address
   );
 
+  if (signal_number != 0) return ant_c_native_fault(js, function->entry_name, signal_number, fault_address);
   return ant_c_result_to_js(js, function->returns, function->return_type, &result);
 }
 
@@ -675,28 +714,44 @@ static ant_value_t ant_c_call_configured_entry(
   );
 
   ant_c_arg_value_t native_result = {0};
-  ffi_call(&cif, entry_item->addr, &native_result, NULL);
-  return ant_c_result_to_js(
-    js, signature->returns, signature->return_type, &native_result
-  );
+  uintptr_t fault_address = 0;
+  
+  int signal_number = ant_c_call_ffi_guarded(&cif, entry_item->addr, &native_result, NULL, &fault_address);
+  if (signal_number != 0) return ant_c_native_fault(js, signature->entry_name, signal_number, fault_address);
+  
+  return ant_c_result_to_js(js, signature->returns, signature->return_type, &native_result);
 }
 
 static ant_value_t ant_c_call_status_entry(
   ant_t *js, MIR_item_t entry_item, MIR_func_t entry_func
 ) {
-  if (entry_func->nargs == 0) {
-    int (*entry)(void) = (int (*)(void))entry_item->addr;
-    return js_mknum((double)entry());
-  }
+  ffi_type *arg_types[] = {
+    &ffi_type_sint32,
+    &ffi_type_pointer,
+    &ffi_type_pointer,
+  };
+  
+  ffi_cif cif;
+  if (ffi_prep_cif(
+    &cif, FFI_DEFAULT_ABI, (unsigned int)entry_func->nargs,
+    &ffi_type_sint32, arg_types
+  ) != FFI_OK) return js_mkerr(js, "Ant.unsafe.c() failed to prepare the main call interface");
 
-  char *entry_argv[] = {"Ant.unsafe.c", NULL};
-  if (entry_func->nargs == 2) {
-    int (*entry)(int, char **) = (int (*)(int, char **))entry_item->addr;
-    return js_mknum((double)entry(1, entry_argv));
-  }
-
-  int (*entry)(int, char **, char **) = (int (*)(int, char **, char **))entry_item->addr;
-  return js_mknum((double)entry(1, entry_argv, NULL));
+  int argc = 1;
+  char *argv_data[] = {"Ant.unsafe.c", NULL};
+  char **argv = argv_data;
+  char **envp = NULL;
+  void *args[] = {&argc, &argv, &envp};
+  
+  int result = 0;
+  uintptr_t fault_address = 0;
+  int signal_number = ant_c_call_ffi_guarded(
+    &cif, entry_item->addr, &result,
+    entry_func->nargs == 0 ? NULL : args, &fault_address
+  );
+  
+  if (signal_number != 0) return ant_c_native_fault(js, "main", signal_number, fault_address);
+  return js_mknum((double)result);
 }
 
 static ant_value_t ant_c_compile(ant_t *js, ant_value_t source_value, ant_value_t options_value) {
