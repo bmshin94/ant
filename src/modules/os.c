@@ -38,8 +38,10 @@
 #endif
 
 #include "ant.h"
+#include "gc.h"
 #include "errors.h"
 #include "internal.h"
+#include "gc/roots.h"
 #include "modules/symbol.h"
 
 #ifdef _WIN32
@@ -346,20 +348,78 @@ typedef struct {
   double user, nice, sys, idle, irq;
 } cpu_times_t;
 
-static void push_cpu_entry(ant_t *js, ant_value_t arr, const char *model, double speed, cpu_times_t *times) {
-  ant_value_t cpu = js_mkobj(js);
-  js_set(js, cpu, "model", js_mkstr(js, model, strlen(model)));
-  js_set(js, cpu, "speed", js_mknum(speed));
+enum { CPU_MODEL, CPU_SPEED, CPU_TIMES };
+enum { CPU_TIME_USER, CPU_TIME_NICE, CPU_TIME_SYS, CPU_TIME_IDLE, CPU_TIME_IRQ };
+
+static ant_value_t os_new_cpu_record(ant_t *js) {
+  ant_value_t seed = js->mutable_roots.os_cpu_template;
+  if (vtype(seed) != kTypeObject) {
+    seed = js_mkobj(js);
+    if (is_err(seed)) return seed;
+    GC_ROOT_SAVE(mark, js);
+    GC_ROOT_PIN(js, seed);
+    js_mkprop_fast(js, seed, "model", 5, js_mkundef());
+    js_mkprop_fast(js, seed, "speed", 5, js_mkundef());
+    js_mkprop_fast(js, seed, "times", 5, js_mkundef());
+    GC_ROOT_RESTORE(js, mark);
+    if (js->thrown_exists) return mkval(kTypeError, 0);
+    js->mutable_roots.os_cpu_template = seed;
+  }
+  return js_mkobj_from_template(js, seed);
+}
+
+static ant_value_t os_new_cpu_times(ant_t *js) {
+  ant_value_t seed = js->mutable_roots.os_cpu_times_template;
+  if (vtype(seed) != kTypeObject) {
+    seed = js_mkobj(js);
+    if (is_err(seed)) return seed;
+    GC_ROOT_SAVE(mark, js);
+    GC_ROOT_PIN(js, seed);
+    js_mkprop_fast(js, seed, "user", 4, js_mkundef());
+    js_mkprop_fast(js, seed, "nice", 4, js_mkundef());
+    js_mkprop_fast(js, seed, "sys", 3, js_mkundef());
+    js_mkprop_fast(js, seed, "idle", 4, js_mkundef());
+    js_mkprop_fast(js, seed, "irq", 3, js_mkundef());
+    GC_ROOT_RESTORE(js, mark);
+    if (js->thrown_exists) return mkval(kTypeError, 0);
+    js->mutable_roots.os_cpu_times_template = seed;
+  }
+  return js_mkobj_from_template(js, seed);
+}
+
+static ant_value_t push_cpu_entry(ant_t *js, ant_value_t arr, const char *model, double speed, cpu_times_t *times) {
+  GC_ROOT_SAVE(mark, js);
+  GC_ROOT_PIN(js, arr);
   
-  ant_value_t t = js_mkobj(js);
-  js_set(js, t, "user", js_mknum(times->user));
-  js_set(js, t, "nice", js_mknum(times->nice));
-  js_set(js, t, "sys", js_mknum(times->sys));
-  js_set(js, t, "idle", js_mknum(times->idle));
-  js_set(js, t, "irq", js_mknum(times->irq));
-  js_set(js, cpu, "times", t);
+  ant_value_t cpu = os_new_cpu_record(js);
+  if (is_err(cpu)) { GC_ROOT_RESTORE(js, mark); return cpu; }
+  GC_ROOT_PIN(js, cpu);
   
+  ant_value_t t = os_new_cpu_times(js);
+  if (is_err(t)) { GC_ROOT_RESTORE(js, mark); return t; }
+  GC_ROOT_PIN(js, t);
+  
+  ant_object_t *timing = js_obj_ptr(t);
+  ant_object_prop_set_unchecked(timing, CPU_TIME_USER, js_mknum(times->user));
+  ant_object_prop_set_unchecked(timing, CPU_TIME_NICE, js_mknum(times->nice));
+  ant_object_prop_set_unchecked(timing, CPU_TIME_SYS, js_mknum(times->sys));
+  ant_object_prop_set_unchecked(timing, CPU_TIME_IDLE, js_mknum(times->idle));
+  ant_object_prop_set_unchecked(timing, CPU_TIME_IRQ, js_mknum(times->irq));
+
+  ant_value_t name = js_mkstr(js, model, strlen(model));
+  if (is_err(name)) { GC_ROOT_RESTORE(js, mark); return name; }
+  
+  ant_object_t *obj = js_obj_ptr(cpu);
+  ant_object_prop_set_unchecked(obj, CPU_MODEL, name);
+  gc_write_barrier(js, obj, name);
+  ant_object_prop_set_unchecked(obj, CPU_SPEED, js_mknum(speed));
+  ant_object_prop_set_unchecked(obj, CPU_TIMES, t);
+  
+  gc_write_barrier(js, obj, t);
   js_arr_push(js, arr, cpu);
+  GC_ROOT_RESTORE(js, mark);
+  
+  return js->thrown_exists ? mkval(kTypeError, 0) : js_mkundef();
 }
 
 #ifdef __APPLE__
@@ -393,7 +453,12 @@ static ant_value_t os_cpus_darwin(ant_t *js) {
       .idle = (double)load[i].cpu_ticks[CPU_STATE_IDLE] * 10,
       .irq  = 0
     };
-    push_cpu_entry(js, arr, model, speed, &times);
+    
+    ant_value_t result = push_cpu_entry(js, arr, model, speed, &times);
+    if (is_err(result)) {
+      vm_deallocate(mach_task_self(), (vm_address_t)cpu_info, info_count * sizeof(integer_t));
+      return result;
+    }
   }
   
   vm_deallocate(mach_task_self(), (vm_address_t)cpu_info, info_count * sizeof(integer_t));
@@ -455,9 +520,12 @@ read_stat:
       .idle = (double)idle * 10,
       .irq  = (double)(irq + softirq) * 10
     };
-    push_cpu_entry(js, arr, model, speed, &times);
+    
+    ant_value_t result = push_cpu_entry(js, arr, model, speed, &times);
+    if (is_err(result)) { fclose(fp); return result; }
     cpu_idx++;
   }
+  
   fclose(fp);
   return arr;
 }

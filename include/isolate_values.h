@@ -140,6 +140,11 @@ ANT_BUILTIN_ARR(zlib_protos, 9)
 
 #ifdef ANT_MUTABLE_ROOT
 ANT_MUTABLE_ROOT(iterator_result_template)
+ANT_MUTABLE_ROOT(fs_stats_template)
+ANT_MUTABLE_ROOT(fs_read_result_template)
+ANT_MUTABLE_ROOT(fs_write_result_template)
+ANT_MUTABLE_ROOT(os_cpu_template)
+ANT_MUTABLE_ROOT(os_cpu_times_template)
 ANT_MUTABLE_ROOT(crypto_array_iterator_next)
 ANT_MUTABLE_ROOT_ARR(crypto_key_templates, 8)
 ANT_MUTABLE_ROOT_ARR(crypto_usage_strings, 8)

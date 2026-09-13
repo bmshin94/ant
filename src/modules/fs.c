@@ -24,6 +24,7 @@
 #include "internal.h"
 #include "descriptors.h"
 
+#include "gc.h"
 #include "gc/roots.h"
 #include "gc/modules.h"
 #include "silver/call.h"
@@ -664,44 +665,166 @@ static void fs_init_stream_constructors(ant_t *js) {
   js_set_proto_init(js->builtins.writestream_ctor, stream_writable_constructor(js));
 }
 
+typedef enum {
+  FS_STATS_DEV,
+  FS_STATS_INO,
+  FS_STATS_SIZE,
+  FS_STATS_MODE,
+  FS_STATS_NLINK,
+  FS_STATS_UID,
+  FS_STATS_GID,
+  FS_STATS_RDEV,
+  FS_STATS_BLKSIZE,
+  FS_STATS_BLOCKS,
+  FS_STATS_ATIME_MS,
+  FS_STATS_MTIME_MS,
+  FS_STATS_CTIME_MS,
+  FS_STATS_BIRTHTIME_MS,
+  FS_STATS_ATIME,
+  FS_STATS_MTIME,
+  FS_STATS_CTIME,
+  FS_STATS_BIRTHTIME,
+} fs_stats_slot_t;
+
+enum { FS_IO_BYTES, FS_IO_BUFFER };
+
+static ant_value_t fs_new_stats_record(ant_t *js) {
+  ant_value_t seed = js->mutable_roots.fs_stats_template;
+  
+  if (vtype(seed) != kTypeObject) {
+    seed = js_mkobj(js);
+    if (is_err(seed)) return seed;
+    
+    GC_ROOT_SAVE(mark, js);
+    GC_ROOT_PIN(js, seed);
+    
+    js_mkprop_fast(js, seed, "dev", 3, js_mkundef());
+    js_mkprop_fast(js, seed, "ino", 3, js_mkundef());
+    js_mkprop_fast(js, seed, "size", 4, js_mkundef());
+    js_mkprop_fast(js, seed, "mode", 4, js_mkundef());
+    js_mkprop_fast(js, seed, "nlink", 5, js_mkundef());
+    js_mkprop_fast(js, seed, "uid", 3, js_mkundef());
+    js_mkprop_fast(js, seed, "gid", 3, js_mkundef());
+    js_mkprop_fast(js, seed, "rdev", 4, js_mkundef());
+    js_mkprop_fast(js, seed, "blksize", 7, js_mkundef());
+    js_mkprop_fast(js, seed, "blocks", 6, js_mkundef());
+    js_mkprop_fast(js, seed, "atimeMs", 7, js_mkundef());
+    js_mkprop_fast(js, seed, "mtimeMs", 7, js_mkundef());
+    js_mkprop_fast(js, seed, "ctimeMs", 7, js_mkundef());
+    js_mkprop_fast(js, seed, "birthtimeMs", 11, js_mkundef());
+    js_mkprop_fast(js, seed, "atime", 5, js_mkundef());
+    js_mkprop_fast(js, seed, "mtime", 5, js_mkundef());
+    js_mkprop_fast(js, seed, "ctime", 5, js_mkundef());
+    js_mkprop_fast(js, seed, "birthtime", 9, js_mkundef());
+    GC_ROOT_RESTORE(js, mark);
+    
+    if (js->thrown_exists) return mkval(kTypeError, 0);
+    js->mutable_roots.fs_stats_template = seed;
+  }
+  
+  return js_mkobj_from_template(js, seed);
+}
+
+static ant_value_t fs_new_io_result(ant_t *js, bool written, double bytes, ant_value_t buffer) {
+  GC_ROOT_SAVE(mark, js);
+  GC_ROOT_PIN(js, buffer);
+  
+  ant_value_t *cache = written
+    ? &js->mutable_roots.fs_write_result_template
+    : &js->mutable_roots.fs_read_result_template;
+  
+  ant_value_t seed = *cache;
+  if (vtype(seed) != kTypeObject) {
+    seed = js_mkobj(js);
+    if (is_err(seed)) { GC_ROOT_RESTORE(js, mark); return seed; }
+    
+    GC_ROOT_PIN(js, seed);
+    if (written) js_mkprop_fast(js, seed, "bytesWritten", 12, js_mknum(0));
+    else js_mkprop_fast(js, seed, "bytesRead", 9, js_mknum(0));
+    
+    js_mkprop_fast(js, seed, "buffer", 6, js_mkundef());
+    if (js->thrown_exists) { GC_ROOT_RESTORE(js, mark); return mkval(kTypeError, 0); }
+    *cache = seed;
+  }
+  
+  ant_value_t result = js_mkobj_from_template(js, seed);
+  if (!is_err(result)) {
+    ant_object_t *obj = js_obj_ptr(result);
+    ant_object_prop_set_unchecked(obj, FS_IO_BYTES, js_mknum(bytes));
+    ant_object_prop_set_unchecked(obj, FS_IO_BUFFER, buffer);
+    gc_write_barrier(js, obj, buffer);
+  }
+  
+  GC_ROOT_RESTORE(js, mark);
+  return result;
+}
+
 static ant_value_t fs_make_date(ant_t *js, double ms) {
   ant_value_t obj = js_mkobj(js);
+  if (is_err(obj)) return obj;
+  GC_ROOT_SAVE(mark, js);
+  GC_ROOT_PIN(js, obj);
+  
   ant_value_t date_proto = js_get_ctor_proto(js, "Date", 4);
   if (is_object_type(date_proto)) js_set_proto_init(obj, date_proto);
+  
   js_set_slot(obj, SLOT_DATA, tov(ms));
   js_set_slot(obj, SLOT_BRAND, js_mknum(BRAND_DATE));
+  GC_ROOT_RESTORE(js, mark);
+  
   return obj;
 }
 
-static ant_value_t fs_stats_object_new(ant_t *js, const fs_stat_fields_t *f) {
-  ant_value_t stat_obj = js_mkobj(js);
-  ant_value_t proto = js_get_ctor_proto(js, "Stats", 5);
+static bool fs_stats_set_date(ant_t *js, ant_value_t record, fs_stats_slot_t slot, double ms) {
+  ant_value_t date = fs_make_date(js, ms);
+  if (is_err(date)) return false;
+  
+  ant_object_t *obj = js_obj_ptr(record);
+  ant_object_prop_set_unchecked(obj, slot, date);
+  gc_write_barrier(js, obj, date);
+  
+  return true;
+}
 
-  if (is_object_type(proto) || is_special_object(proto))
-    js_set_proto_init(stat_obj, proto);
+static ant_value_t fs_stats_object_new(ant_t *js, const fs_stat_fields_t *f) {
+  ant_value_t stat_obj = fs_new_stats_record(js);
+  if (is_err(stat_obj)) return stat_obj;
+  
+  GC_ROOT_SAVE(mark, js);
+  GC_ROOT_PIN(js, stat_obj);
+  
+  ant_value_t proto = js_get_ctor_proto(js, "Stats", 5);
+  if (is_object_type(proto) || is_special_object(proto)) js_set_proto_init(stat_obj, proto);
 
   js_set_slot(stat_obj, SLOT_DATA, js_mknum((double)f->mode));
-  js_set(js, stat_obj, "dev", js_mknum(f->dev));
-  js_set(js, stat_obj, "ino", js_mknum(f->ino));
-  js_set(js, stat_obj, "size", js_mknum(f->size));
-  js_set(js, stat_obj, "mode", js_mknum((double)f->mode));
-  js_set(js, stat_obj, "nlink", js_mknum(f->nlink));
-  js_set(js, stat_obj, "uid", js_mknum(f->uid));
-  js_set(js, stat_obj, "gid", js_mknum(f->gid));
-  js_set(js, stat_obj, "rdev", js_mknum(f->rdev));
-  js_set(js, stat_obj, "blksize", js_mknum(f->blksize));
-  js_set(js, stat_obj, "blocks", js_mknum(f->blocks));
-
-  js_set(js, stat_obj, "atimeMs",      js_mknum(f->atime_ms));
-  js_set(js, stat_obj, "mtimeMs",      js_mknum(f->mtime_ms));
-  js_set(js, stat_obj, "ctimeMs",      js_mknum(f->ctime_ms));
-  js_set(js, stat_obj, "birthtimeMs",  js_mknum(f->birthtime_ms));
-
-  js_set(js, stat_obj, "atime",      fs_make_date(js, f->atime_ms));
-  js_set(js, stat_obj, "mtime",      fs_make_date(js, f->mtime_ms));
-  js_set(js, stat_obj, "ctime",      fs_make_date(js, f->ctime_ms));
-  js_set(js, stat_obj, "birthtime",  fs_make_date(js, f->birthtime_ms));
+  ant_object_t *obj = js_obj_ptr(stat_obj);
   
+  ant_object_prop_set_unchecked(obj, FS_STATS_DEV, js_mknum(f->dev));
+  ant_object_prop_set_unchecked(obj, FS_STATS_INO, js_mknum(f->ino));
+  ant_object_prop_set_unchecked(obj, FS_STATS_SIZE, js_mknum(f->size));
+  ant_object_prop_set_unchecked(obj, FS_STATS_MODE, js_mknum((double)f->mode));
+  ant_object_prop_set_unchecked(obj, FS_STATS_NLINK, js_mknum(f->nlink));
+  ant_object_prop_set_unchecked(obj, FS_STATS_UID, js_mknum(f->uid));
+  ant_object_prop_set_unchecked(obj, FS_STATS_GID, js_mknum(f->gid));
+  ant_object_prop_set_unchecked(obj, FS_STATS_RDEV, js_mknum(f->rdev));
+  ant_object_prop_set_unchecked(obj, FS_STATS_BLKSIZE, js_mknum(f->blksize));
+  ant_object_prop_set_unchecked(obj, FS_STATS_BLOCKS, js_mknum(f->blocks));
+  ant_object_prop_set_unchecked(obj, FS_STATS_ATIME_MS, js_mknum(f->atime_ms));
+  ant_object_prop_set_unchecked(obj, FS_STATS_MTIME_MS, js_mknum(f->mtime_ms));
+  ant_object_prop_set_unchecked(obj, FS_STATS_CTIME_MS, js_mknum(f->ctime_ms));
+  ant_object_prop_set_unchecked(obj, FS_STATS_BIRTHTIME_MS, js_mknum(f->birthtime_ms));
+
+  if (
+    !fs_stats_set_date(js, stat_obj, FS_STATS_ATIME, f->atime_ms) ||
+    !fs_stats_set_date(js, stat_obj, FS_STATS_MTIME, f->mtime_ms) ||
+    !fs_stats_set_date(js, stat_obj, FS_STATS_CTIME, f->ctime_ms) ||
+    !fs_stats_set_date(js, stat_obj, FS_STATS_BIRTHTIME, f->birthtime_ms)
+  ) {
+    GC_ROOT_RESTORE(js, mark);
+    return mkval(kTypeError, 0);
+  }
+  
+  GC_ROOT_RESTORE(js, mark);
   return stat_obj;
 }
 
@@ -1440,8 +1563,19 @@ static ant_value_t fs_rejected_promise(ant_t *js, ant_value_t err) {
 }
 
 static ant_value_t fs_resolved_promise(ant_t *js, ant_value_t value) {
+  GC_ROOT_SAVE(mark, js);
+  GC_ROOT_PIN(js, value);
+  
   ant_value_t promise = js_mkpromise(js);
+  if (is_err(promise)) {
+    GC_ROOT_RESTORE(js, mark);
+    return promise;
+  }
+  
+  GC_ROOT_PIN(js, promise);
   js_resolve_promise(js, promise, value);
+  GC_ROOT_RESTORE(js, mark);
+  
   return promise;
 }
 
@@ -1554,9 +1688,8 @@ static ant_value_t builtin_fs_filehandle_read(ant_params_t) {
   uv_fs_req_cleanup(&req);
   if (result < 0) return fs_rejected_promise(js, fs_mk_uv_error(js, result, "read", NULL, NULL));
 
-  ant_value_t out = js_mkobj(js);
-  js_set(js, out, "bytesRead", js_mknum((double)result));
-  js_set(js, out, "buffer", args[0]);
+  ant_value_t out = fs_new_io_result(js, false, (double)result, args[0]);
+  if (is_err(out)) return fs_rejected_promise(js, out);
   
   return fs_resolved_promise(js, out);
 }
@@ -1615,9 +1748,8 @@ static ant_value_t builtin_fs_filehandle_write(ant_params_t) {
   uv_fs_req_cleanup(&req);
   if (result < 0) return fs_rejected_promise(js, fs_mk_uv_error(js, result, "write", NULL, NULL));
 
-  ant_value_t out = js_mkobj(js);
-  js_set(js, out, "bytesWritten", js_mknum((double)result));
-  js_set(js, out, "buffer", args[0]);
+  ant_value_t out = fs_new_io_result(js, true, (double)result, args[0]);
+  if (is_err(out)) return fs_rejected_promise(js, out);
   
   return fs_resolved_promise(js, out);
 }
