@@ -89,6 +89,7 @@ export function targets() {
     'test_compile_native_addon.cjs',
     'test_hono_adapter.cjs',
     'test_websocket_binary_type.cjs',
+    'test_websocket_handlers.cjs',
     'test_jit_osr_late_locals.cjs',
     'test_jit_mod.cjs',
     'test_jit_open_upvalue_gc.cjs',
