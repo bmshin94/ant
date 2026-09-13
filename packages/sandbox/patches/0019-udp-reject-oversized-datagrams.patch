@@ -1,0 +1,46 @@
+diff --git a/src/net/netsyscall.c b/src/net/netsyscall.c
+index 266a5b71..2dd8d448 100755
+--- a/src/net/netsyscall.c
++++ b/src/net/netsyscall.c
+@@ -875,8 +875,17 @@ static sysreturn socket_write_udp(netsock s, void *source, struct iovec *iov, u6
+     if (!source || dest_addr) {
+         if (context_set_err(ctx))
+             return -EFAULT;
+-        if (!source)
+-            xfer_len = iov_total_len(iov, length);
++        if (!source) {
++            xfer_len = 0;
++            for (u64 i = 0; i < length; i++) {
++                u64 iov_len = iov[i].iov_len;
++                if (iov_len > U16_MAX - xfer_len) {
++                    context_clear_err(ctx);
++                    return -EMSGSIZE;
++                }
++                xfer_len += iov_len;
++            }
++        }
+         sysreturn ret = 0;
+         if (dest_addr)
+             ret = sockaddr_to_addrport(s, dest_addr, addrlen, true, &ipaddr, &port);
+@@ -884,6 +893,10 @@ static sysreturn socket_write_udp(netsock s, void *source, struct iovec *iov, u6
+         if (ret)
+             return ret;
+     }
++    if (source)
++        xfer_len = length;
++    if (xfer_len > U16_MAX)
++        return -EMSGSIZE;
+     err_t err = ERR_OK;
+
+     /* XXX check how much we can queue, maybe make udp bh */
+@@ -893,8 +906,6 @@ static sysreturn socket_write_udp(netsock s, void *source, struct iovec *iov, u6
+     if (!dest_addr && !udp_is_flag_set(s->info.udp.lw, UDP_FLAGS_CONNECTED)) {
+         netsock_unlock(s);
+         return -EDESTADDRREQ;
+     }
+
+-    if (source)
+-        xfer_len = length;
+     struct pbuf *pbuf = pbuf_alloc(PBUF_TRANSPORT, xfer_len, PBUF_RAM);
+     if (!pbuf) {
+         netsock_unlock(s);

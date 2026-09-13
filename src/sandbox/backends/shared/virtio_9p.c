@@ -140,7 +140,7 @@ uint32_t ant_hvf_9p_append_dirent(unsigned char *out,
                                          uint8_t dtype) {
   size_t name_len = strlen(name);
   uint32_t rec_len = (uint32_t)(13u + 8u + 1u + 2u + name_len);
-  if (name_len > UINT16_MAX || rec_len > cap - off) return 0;
+  if (name_len > UINT16_MAX || off > cap || rec_len > cap - off) return 0;
 
   ant_hvf_9p_qid(out + off, is_dir, qid_path);
   ant_hvf_store64(out + off + 13, next_offset);
@@ -375,6 +375,7 @@ static bool ant_hvf_9p_copy_file_cache_entry(ant_hvf_9p_file_cache_entry_t *entr
                                              uint64_t offset,
                                              uint32_t count,
                                              unsigned char *out,
+                                             size_t out_cap,
                                              uint32_t *got) {
   *got = 0;
   if (offset >= entry->size) return true;
@@ -382,6 +383,7 @@ static bool ant_hvf_9p_copy_file_cache_entry(ant_hvf_9p_file_cache_entry_t *entr
   size_t start = (size_t)offset;
   size_t available = entry->size - start;
   size_t n = count < available ? count : available;
+  if (n > out_cap) n = out_cap;
   if (n) memcpy(out, entry->data + start, n);
   *got = (uint32_t)n;
   return true;
@@ -394,6 +396,7 @@ static bool ant_hvf_9p_read_cached_file(ant_hvf_9p_device_t *dev,
                                         uint64_t offset,
                                         uint32_t count,
                                         unsigned char *out,
+                                        size_t out_cap,
                                         uint32_t *got) {
   if (!dev->readonly || !S_ISREG(st->st_mode)) {
     dev->stats.file_cache_bypasses++;
@@ -407,7 +410,7 @@ static bool ant_hvf_9p_read_cached_file(ant_hvf_9p_device_t *dev,
   ant_hvf_9p_file_cache_entry_t *entry = ant_hvf_9p_file_cache_find(dev, rel);
   if (entry) {
     dev->stats.file_cache_hits++;
-    return ant_hvf_9p_copy_file_cache_entry(entry, offset, count, out, got);
+    return ant_hvf_9p_copy_file_cache_entry(entry, offset, count, out, out_cap, got);
   }
 
   size_t size = (size_t)st->st_size;
@@ -478,7 +481,7 @@ static bool ant_hvf_9p_read_cached_file(ant_hvf_9p_device_t *dev,
   entry->size = size;
   dev->file_cache_count++;
   dev->file_cache_bytes += size;
-  return ant_hvf_9p_copy_file_cache_entry(entry, offset, count, out, got);
+  return ant_hvf_9p_copy_file_cache_entry(entry, offset, count, out, out_cap, got);
 }
 
 static int ant_hvf_9p_stat_cached(ant_hvf_9p_device_t *dev,
@@ -759,7 +762,7 @@ uint32_t ant_hvf_9p_handle(ant_hvf_9p_device_t *dev,
                                   size_t req_len,
                                   unsigned char *resp,
                                   size_t resp_cap) {
-  if (req_len < 7) return 0;
+  if (req_len < 7 || resp_cap < 11) return 0;
   uint8_t type = req[4];
   uint16_t tag = ant_hvf_load16(req + 5);
   dev->stats.requests++;
@@ -882,14 +885,16 @@ uint32_t ant_hvf_9p_handle(ant_hvf_9p_device_t *dev,
       uint32_t count = ant_hvf_load32(req + 19);
       f = ant_hvf_9p_fid(dev, fid, false);
       if (!f || !f->active) return ant_hvf_9p_error(resp, tag, ENOENT);
-      if (11u + count > resp_cap) count = (uint32_t)(resp_cap - 11u);
+      size_t payload_cap = resp_cap - 11u;
+      if (count > payload_cap) count = (uint32_t)payload_cap;
       uint32_t got = 0;
       char host[ANT_HVF_9P_HOST_PATH_MAX];
       struct stat st;
       int rc = ant_hvf_9p_stat_cached(dev, f->path, &st, host, sizeof(host));
       if (rc != 0) return ant_hvf_9p_error(resp, tag, (uint32_t)-rc);
       if (!S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode)) return ant_hvf_9p_error(resp, tag, EISDIR);
-      if (!ant_hvf_9p_read_cached_file(dev, f->path, host, &st, offset, count, resp + 11, &got)) {
+      if (!ant_hvf_9p_read_cached_file(dev, f->path, host, &st, offset, count,
+                                       resp + 11, payload_cap, &got)) {
         int fd = open(host, O_RDONLY);
         if (fd < 0) return ant_hvf_9p_error(resp, tag, (uint32_t)errno);
         ssize_t n = pread(fd, resp + 11, count, (off_t)offset);
@@ -901,6 +906,7 @@ uint32_t ant_hvf_9p_handle(ant_hvf_9p_device_t *dev,
         got = (uint32_t)n;
         close(fd);
       }
+      if (got > payload_cap) return ant_hvf_9p_error(resp, tag, EOVERFLOW);
       dev->stats.read_count++;
       dev->stats.read_bytes += got;
       ant_hvf_9p_count_path(dev, f->path, false, false, true, false, got);
@@ -915,7 +921,7 @@ uint32_t ant_hvf_9p_handle(ant_hvf_9p_device_t *dev,
       fid = ant_hvf_load32(req + 7);
       uint64_t offset = ant_hvf_load64(req + 11);
       uint32_t count = ant_hvf_load32(req + 19);
-      if (23u + count > req_len) return ant_hvf_9p_error(resp, tag, EINVAL);
+      if (count > req_len - 23u) return ant_hvf_9p_error(resp, tag, EINVAL);
       f = ant_hvf_9p_fid(dev, fid, false);
       if (!f || !f->active) return ant_hvf_9p_error(resp, tag, ENOENT);
       char host[ANT_HVF_9P_HOST_PATH_MAX];
@@ -1345,7 +1351,8 @@ int ant_hvf_virtio_9p_notify(ant_hvf_vm_t *vm, ant_hvf_9p_device_t *dev) {
                                req, dev->msize, &req_len, writes, ANT_HVF_9P_MAX_WRITE_IOV, &writes_len);
     if (rc != 0) return rc;
     uint64_t start_ns = ant_hvf_9p_now_ns();
-    uint32_t resp_len = ant_hvf_9p_handle(dev, req, req_len, resp, dev->msize);
+    size_t resp_cap = dev->msize;
+    uint32_t resp_len = ant_hvf_9p_handle(dev, req, req_len, resp, resp_cap);
     uint64_t end_ns = ant_hvf_9p_now_ns();
     if (start_ns && end_ns >= start_ns) {
       uint64_t elapsed = end_ns - start_ns;
@@ -1356,6 +1363,7 @@ int ant_hvf_virtio_9p_notify(ant_hvf_vm_t *vm, ant_hvf_9p_device_t *dev) {
       }
     }
     if (resp_len == 0) resp_len = ant_hvf_9p_error(resp, 0, EIO);
+    if (resp_len > resp_cap) return -EOVERFLOW;
     if (resp_len >= 5 && resp[4] == P9_RLERROR) dev->stats.errors++;
     rc = ant_hvf_9p_write_response(vm, writes, writes_len, resp, resp_len);
     if (rc != 0) return rc;
@@ -1366,4 +1374,3 @@ int ant_hvf_virtio_9p_notify(ant_hvf_vm_t *vm, ant_hvf_9p_device_t *dev) {
 
   return ant_hvf_virtio_interrupt(vm, vdev, 0);
 }
-
