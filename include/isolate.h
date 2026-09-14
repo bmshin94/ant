@@ -59,6 +59,12 @@ struct ant_isolate_t {
   ant_fixed_arena_t closure_arena;
   ant_fixed_arena_t upvalue_arena;
 
+  struct {
+    struct code_block *head;
+    struct code_block *current;
+    struct code_intern_entry *interns;
+  } code_arena;
+
   uint32_t next_ic_object_identity;
   uint32_t prototype_write_epoch;
 

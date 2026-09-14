@@ -27,6 +27,7 @@ removed during condensation. See the [plan lifecycle](../index.md).
 - [Eval Binding Fixes](eval-binding-fixes.md)
 - [fable-perf-fixes Landing](fable-perf-fixes-landing.md)
 - [Guarded charCodeAt Opcode](charcode-intrinsic.md)
+- [Isolate Code Ownership](isolate-code-arena.md)
 - [Listener Accept Bursts](listener-accept-burst.md)
 - [Module Import GC Flake](module-import-gc-flake.md)
 - [NUL Property Keys and Array Includes Correctness](nul-keys-and-array-includes.md)
