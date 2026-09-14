@@ -357,6 +357,23 @@ struct ant_isolate_t {
   
   ant_value_t primordials;
   ant_value_t primordial_values[ANT_PRIMORDIAL_COUNT];
+
+  struct {
+    struct timer_entry *timers;
+    struct microtask_entry *next_ticks;
+    struct microtask_entry *next_ticks_tail;
+    struct microtask_entry *next_ticks_processing;
+    struct microtask_entry *microtasks;
+    struct microtask_entry *microtasks_tail;
+    struct microtask_entry *microtasks_processing;
+    struct immediate_entry *immediates;
+    struct immediate_entry *immediates_tail;
+    int next_timer_id;
+    int next_immediate_id;
+    int active_timer_count;
+    int active_refed_timer_count;
+    bool closing;
+  } timer_state;
 };
 
 #endif
