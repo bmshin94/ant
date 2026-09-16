@@ -12,6 +12,10 @@ void jit_setup_prototypes(jit_compile_t *c, MIR_type_t ret_type) {
                                 MIR_T_I32, "argc",
                                 MIR_T_P, "closure");
   MIR_type_t h2_ret = MIR_JSVAL;
+  MIR_type_t call_target_ret = MIR_T_I32;
+  c->call_target_proto = MIR_new_proto(c->ctx, "call_target_proto", 1, &call_target_ret,
+      3, MIR_T_P, "caller", MIR_T_U32, "offset", MIR_JSVAL, "callee");
+  c->imp_record_call_target = MIR_new_import(c->ctx, "jit_helper_record_call_target");
   c->helper2_proto = MIR_new_proto(c->ctx, "helper2_proto",
                                    1, &h2_ret,
                                    4,

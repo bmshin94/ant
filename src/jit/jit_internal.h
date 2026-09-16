@@ -52,6 +52,7 @@ typedef struct {
   bool *has_const;
   uint8_t *known_bool;
   jit_integer_range_t *integer_range;
+  uint8_t *parameter_origin;
   int sp, max;
   bool overflow;
 } jit_vstack_t;
@@ -62,6 +63,7 @@ typedef struct {
   bool has_const;
   uint8_t known_bool;
   jit_integer_range_t integer_range;
+  uint8_t parameter_origin;
 } jit_value_info_t;
 
 #define MAX_LABELS 1024
@@ -329,6 +331,15 @@ typedef enum {
   JIT_ELEMENT_READ,
   JIT_ELEMENT_WRITE,
 } jit_element_access_t;
+typedef struct {
+  MIR_reg_t data, length;
+  bool writable;
+} jit_array_guard_fact_t;
+MIR_reg_t mir_emit_dense_element_guard_with_fact(
+    MIR_context_t ctx, MIR_item_t fn,
+    MIR_reg_t object, MIR_reg_t index, MIR_reg_t value,
+    jit_element_access_t access, MIR_label_t slow, int site,
+    jit_array_guard_fact_t *fact);
 MIR_reg_t mir_emit_dense_element_guard(
     MIR_context_t ctx, MIR_item_t fn,
     MIR_reg_t object, MIR_reg_t index, MIR_reg_t value,

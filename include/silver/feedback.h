@@ -38,7 +38,7 @@ static_assert(
 
 #define SV_CALL_FB_MAX_SLOTS    32
 #define SV_JIT_BAILOUT_LIMIT    5
-#define SV_CALL_FB_MISS_DISABLE 4
+#define SV_CALL_FB_MAX_TARGETS  4
 
 #define SV_JIT_RETRY_INTERP mkval(kTypeError, 1)
 
@@ -339,44 +339,55 @@ static inline void sv_tfb_ensure(sv_func_t *fn) {
     fn->local_type_feedback = calloc((size_t)fn->max_locals, 1);
 }
 
+// One bounded table row per distinct (call site, function) pair. A stable small
+// set stays specialized regardless of dispatch order; an unseen fifth target
+// disables that site. Function metadata has code-arena lifetime.
 static inline void sv_tfb_record_call_target(sv_func_t *func, int bc_off, sv_func_t *callee) {
-  if (!callee) return;
+  if (!callee || bc_off < 0 || bc_off > UINT16_MAX) return;
   sv_call_target_fb_t *fb = func->call_target_fb;
-  int count = func->call_target_fb_count;
+  int count = func->call_target_fb_count, matches = 0;
   for (int i = 0; i < count; i++) {
     if (fb[i].bc_off != (uint16_t)bc_off) continue;
-    if (fb[i].disabled) return;
-    if (fb[i].target == callee) return;
-    if (fb[i].target == NULL) { fb[i].target = callee; return; }
-    fb[i].miss_count++;
-    if (fb[i].miss_count >= SV_CALL_FB_MISS_DISABLE) {
+    if (fb[i].disabled || fb[i].target == callee) return;
+    matches++;
+  }
+  if (matches && (matches >= SV_CALL_FB_MAX_TARGETS || count >= SV_CALL_FB_MAX_SLOTS)) {
+    for (int i = 0; i < count; i++) if (fb[i].bc_off == (uint16_t)bc_off) {
       fb[i].disabled = 1;
       fb[i].target = NULL;
-    } else fb[i].target = callee;
+    }
     func->tfb_version++;
     return;
   }
   if (count >= SV_CALL_FB_MAX_SLOTS) return;
   if (!fb) {
-    fb = calloc(SV_CALL_FB_MAX_SLOTS, sizeof(sv_call_target_fb_t));
+    fb = calloc(SV_CALL_FB_MAX_SLOTS, sizeof(*fb));
     if (!fb) return;
     func->call_target_fb = fb;
   }
   fb[count].bc_off = (uint16_t)bc_off;
   fb[count].target = callee;
-  fb[count].miss_count = 0;
   fb[count].disabled = 0;
   func->call_target_fb_count = (uint8_t)(count + 1);
+  if (matches) func->tfb_version++;
+}
+
+static inline int sv_tfb_get_call_targets(sv_func_t *func, int bc_off,
+                                         sv_func_t **targets, int capacity) {
+  if (bc_off < 0 || bc_off > UINT16_MAX) return 0;
+  int count = 0;
+  for (int i = 0; i < func->call_target_fb_count; i++) {
+    sv_call_target_fb_t *fb = &func->call_target_fb[i];
+    if (fb->bc_off != (uint16_t)bc_off) continue;
+    if (fb->disabled) return 0;
+    if (fb->target && count < capacity) targets[count++] = fb->target;
+  }
+  return count;
 }
 
 static inline sv_func_t *sv_tfb_get_call_target(sv_func_t *func, int bc_off) {
-  sv_call_target_fb_t *fb = func->call_target_fb;
-  int count = func->call_target_fb_count;
-  for (int i = 0; i < count; i++) {
-    if (fb[i].bc_off == (uint16_t)bc_off && !fb[i].disabled)
-      return fb[i].target;
-  }
-  return NULL;
+  sv_func_t *targets[2];
+  return sv_tfb_get_call_targets(func, bc_off, targets, 2) == 1 ? targets[0] : NULL;
 }
 
 static inline void sv_tfb_record_local(sv_func_t *func, int idx, ant_value_t v) {

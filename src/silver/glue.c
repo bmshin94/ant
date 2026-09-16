@@ -41,6 +41,13 @@ ant_value_t jit_helper_normalize_sloppy_this(ant_t *js, ant_value_t value) {
   return js_normalize_sloppy_this(js, value);
 }
 
+int32_t jit_helper_record_call_target(sv_func_t *caller, uint32_t bc_off, ant_value_t callee) {
+  if (vtype(callee) != kTypeFunction || bc_off > UINT16_MAX) return 0;
+  uint32_t version = caller->tfb_version;
+  sv_tfb_record_call_target(caller, (int)bc_off, js_func_closure(callee)->func);
+  return caller->tfb_version != version;
+}
+
 ant_value_t jit_helper_add_at_site(sv_vm_t *vm, ant_t *js, ant_value_t l, ant_value_t r, gc_alloc_site_t *site) {
   if (vtype(l) == kTypeNumber && vtype(r) == kTypeNumber) return tov(tod(l) + tod(r));
   if (vtype(l) == kTypeString && vtype(r) == kTypeString) {

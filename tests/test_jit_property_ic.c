@@ -1,6 +1,7 @@
 // meson test -C build jit-property-ic
 #include "../src/jit/jit_internal.h"
 #include "gc/roots.h"
+#include "mir-gen.h"
 #include <assert.h>
 
 // Inject registration failure only into this translation unit's IC helpers.
@@ -170,11 +171,65 @@ static void check_shape_snapshot_invalidation(void) {
   }
 }
 
+static void check_adaptive_own_fallback(ant_t *js) {
+  ant_value_t original = js_mkobj(js);
+  js_set(js, original, "x", js_mknum(41));
+  sv_atom_t atom = {.str = intern_string("x", 1), .len = 1};
+  sv_ic_entry_t ic = {0};
+  ant_value_t value;
+  assert(sv_try_prop_get_ic_no_effect(js, original, &atom, &ic, &value));
+  ic.cached_aux |= SV_GF_IC_AUX_ACTIVE_BIT;
+  sv_func_t func = {.ic_slots = &ic, .ic_count = 1};
+  MIR_context_t ctx = MIR_init();
+  MIR_gen_init(ctx);
+  MIR_gen_set_optimize_level(ctx, 3);
+  MIR_module_t module = MIR_new_module(ctx, "adaptive_own");
+  MIR_type_t ret = MIR_JSVAL;
+  MIR_item_t fn = MIR_new_func(ctx, "read", 1, &ret, 1, MIR_JSVAL, "object");
+  MIR_reg_t object = MIR_reg(ctx, "object", fn->u.func);
+  MIR_reg_t cage = MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, "cage_base");
+  MIR_reg_t epoch = MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, "epoch");
+  MIR_reg_t result = MIR_new_func_reg(ctx, fn->u.func, MIR_JSVAL, "result");
+  mir_load_imm(ctx, fn, cage, ant_cage_base());
+  mir_load_imm(ctx, fn, epoch, (uintptr_t)&ant_ic_epoch_counter);
+  MIR_label_t slow = MIR_new_label(ctx);
+  assert(mir_emit_get_field_ic_fastpath(ctx, fn, js, &func, 0, 0, &atom, object, result, slow, epoch));
+  MIR_append_insn(ctx, fn, MIR_new_ret_insn(ctx, 1, MIR_new_reg_op(ctx, result)));
+  MIR_append_insn(ctx, fn, slow);
+  MIR_append_insn(ctx, fn, MIR_new_ret_insn(ctx, 1, MIR_new_uint_op(ctx, js_mkundef())));
+  MIR_finish_func(ctx); MIR_finish_module(ctx);
+  MIR_load_module(ctx, module); MIR_link(ctx, MIR_set_gen_interface, NULL);
+  ant_value_t (*read)(ant_value_t) = (ant_value_t (*)(ant_value_t))MIR_gen(ctx, fn);
+  assert(read(original) == js_mknum(41));
+  for (unsigned padding = 1; padding <= 8; padding += 7) {
+    ant_value_t other = js_mkobj(js);
+    for (unsigned i = 0; i < padding; i++) {
+      char key[16]; snprintf(key, sizeof(key), "padding%u", i);
+      js_set(js, other, key, js_mknum(i));
+    }
+    js_set(js, other, "x", js_mknum(42));
+    assert(sv_try_prop_get_ic_no_effect(js, other, &atom, &ic, &value));
+    assert(ic.cached_index == padding);
+    // The emitted fallback must adopt both an inline and an overflow slot.
+    assert(read(other) == js_mknum(42));
+    assert(read(original) == js_mknum(41)); // The pinned snapshot remains valid.
+    ic.cached_index = UINT32_MAX;
+    assert(read(other) == js_mkundef());
+    ic.cached_index = padding;
+    ic.epoch--;
+    assert(read(other) == js_mkundef());
+    ic.epoch = ant_ic_epoch_counter;
+  }
+  MIR_gen_finish(ctx); MIR_finish(ctx);
+  sv_ic_shape_refs_cleanup(js); // The registered stack IC must not outlive this scope.
+}
+
 int main(void) {
   char stack_base;
   ant_t *js = ant_create();
   assert(js);
   js_setstackbase(js, &stack_base);
+  check_adaptive_own_fallback(js);
   check_shape_snapshot_invalidation();
   GC_ROOT_SAVE(roots, js);
   ant_value_t old = js_mkobj(js);

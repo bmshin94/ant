@@ -285,7 +285,6 @@ static constexpr uint32_t SV_TFB_CTOR_PROP_OVERFLOW_FROM = SV_TFB_CTOR_PROP_BINS
 
 typedef struct {
   uint16_t    bc_off;
-  uint8_t     miss_count;
   uint8_t     disabled;
   sv_func_t  *target;
 } sv_call_target_fb_t;

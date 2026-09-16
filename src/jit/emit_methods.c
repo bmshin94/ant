@@ -148,11 +148,21 @@ void jit_emit_methods(jit_compile_t *c) {
       MIR_label_t cm_devirt_join = NULL;
 
       if (!is_tail || c->jit_try_depth == 0) {
-        sv_func_t *inline_callee = sv_tfb_get_call_target(c->func, c->bc_off);
-        if (inline_callee && (!is_tail || inline_callee != c->func) && jit_inlineable(inline_callee)) {
+        sv_func_t *targets[SV_CALL_FB_MAX_TARGETS];
+        int target_count = sv_tfb_get_call_targets(c->func, c->bc_off, targets, SV_CALL_FB_MAX_TARGETS);
+        int inline_budget = 2 * JIT_INLINE_MAX_BYTECODE;
+        MIR_reg_t observed_function = 0;
+        for (int target = 0; target < target_count; target++) {
+          sv_func_t *inline_callee = targets[target];
+          if ((is_tail && inline_callee == c->func) || !jit_inlineable(inline_callee) ||
+              inline_callee->code_len > inline_budget) continue;
+          inline_budget -= inline_callee->code_len;
           int mcn = c->call_n++;
-          cm_devirt_slow = MIR_new_label(c->ctx);
-          cm_devirt_join = MIR_new_label(c->ctx);
+          if (!cm_devirt_slow) {
+            cm_devirt_slow = MIR_new_label(c->ctx);
+            cm_devirt_join = MIR_new_label(c->ctx);
+          }
+          MIR_label_t next_target = MIR_new_label(c->ctx);
 
           MIR_reg_t inl_arg_regs[call_argc > 0 ? call_argc : 1];
           for (int i = 0; i < (int)call_argc; i++)
@@ -180,6 +190,7 @@ void jit_emit_methods(jit_compile_t *c) {
           MIR_reg_t r_inl_sup = MIR_new_func_reg(c->ctx, c->jit_func->u.func, MIR_JSVAL, misup_rn);
           MIR_reg_t r_inl_tag = MIR_new_func_reg(c->ctx, c->jit_func->u.func, MIR_T_I64, mitag_rn);
           MIR_reg_t r_inl_gfn = MIR_new_func_reg(c->ctx, c->jit_func->u.func, MIR_T_I64, mifn_rn);
+          observed_function = r_inl_gfn;
 
           MIR_append_insn(c->ctx, c->jit_func,
                           MIR_new_insn(c->ctx, MIR_BEQ,
@@ -208,7 +219,7 @@ void jit_emit_methods(jit_compile_t *c) {
                                                       r_inl_cl, 0, 1)));
           MIR_append_insn(c->ctx, c->jit_func,
                           MIR_new_insn(c->ctx, MIR_BNE,
-                                       MIR_new_label_op(c->ctx, cm_devirt_slow),
+                                       MIR_new_label_op(c->ctx, next_target),
                                        MIR_new_reg_op(c->ctx, r_inl_gfn),
                                        MIR_new_uint_op(c->ctx, (uint64_t)(uintptr_t)inline_callee)));
 
@@ -254,8 +265,35 @@ void jit_emit_methods(jit_compile_t *c) {
               c->special_obj_proto, c->imp_special_obj,
               &c->inline_ext);
 
-          MIR_append_insn(c->ctx, c->jit_func, cm_devirt_slow);
+          MIR_append_insn(c->ctx, c->jit_func, next_target);
         }
+        if (cm_devirt_slow && c->ctx == c->jc->ctx_hot) {
+          // Only an unseen target learns here. Known non-inlineable targets and
+          // failed guards inside a body go straight to the ordinary call path.
+          // Cheap-tier callers keep their generic fallback: recompiling them
+          // for each newly seen target makes short-lived dispatch workloads pay
+          // the compilation cost before the wider inline set can repay it.
+          for (int target = 0; target < target_count; target++)
+            MIR_append_insn(c->ctx, c->jit_func, MIR_new_insn(c->ctx, MIR_BEQ,
+                MIR_new_label_op(c->ctx, cm_devirt_slow), MIR_new_reg_op(c->ctx, observed_function),
+                MIR_new_uint_op(c->ctx, (uintptr_t)targets[target])));
+          MIR_append_insn(c->ctx, c->jit_func, MIR_new_call_insn(c->ctx, 6,
+              MIR_new_ref_op(c->ctx, c->call_target_proto), MIR_new_ref_op(c->ctx, c->imp_record_call_target),
+              MIR_new_reg_op(c->ctx, c->r_bool), MIR_new_uint_op(c->ctx, (uintptr_t)c->func),
+              MIR_new_uint_op(c->ctx, (uint32_t)c->bc_off),
+              MIR_new_reg_op(c->ctx, c->vs.regs[c->vs.sp - call_argc - 1])));
+          MIR_append_insn(c->ctx, c->jit_func, MIR_new_insn(c->ctx, MIR_BEQ,
+              MIR_new_label_op(c->ctx, cm_devirt_slow), MIR_new_reg_op(c->ctx, c->r_bool), MIR_new_int_op(c->ctx, 0)));
+          // Resume at CALL, not at the preceding method lookup: that lookup may
+          // already have invoked a getter. The actual call has not run yet.
+          if (c->has_captures) for (int i = 0; i < c->n_locals; i++)
+            if (c->captured_locals[i]) MIR_append_insn(c->ctx, c->jit_func,
+                MIR_new_insn(c->ctx, MIR_MOV, MIR_new_reg_op(c->ctx, c->local_regs[i]),
+                    MIR_new_mem_op(c->ctx, MIR_JSVAL, (MIR_disp_t)(i * sizeof(ant_value_t)), c->r_lbuf, 0, 1)));
+          mir_emit_bailout_jump_typed(c->ctx, c->jit_func, c->bc_off, c->vs.sp,
+              &c->bailout_ctx, -1, SLOT_BOXED, -1, SLOT_BOXED);
+        }
+        if (cm_devirt_slow) MIR_append_insn(c->ctx, c->jit_func, cm_devirt_slow);
       }
 
       int cn = c->call_n++;

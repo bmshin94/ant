@@ -41,6 +41,9 @@ static bool jit_op_inline_after_effect(sv_op_t op) {
     case OP_RETURN_UNDEF:
     case OP_POP:
     case OP_DUP:
+    case OP_DUP2:
+    case OP_INSERT2:
+    case OP_INSERT3:
     case OP_NIP:
     case OP_GET_LOCAL:
     case OP_GET_LOCAL8:
@@ -78,7 +81,7 @@ static bool jit_op_inline_after_effect(sv_op_t op) {
   }
 }
 
-static bool jit_inline_note_instruction(const sv_func_t *f, int off, int size, uint8_t *boundaries) {
+static bool jit_inline_note_instruction(const sv_func_t *f, int off, int size, uint8_t *boundaries, bool allow_backedge) {
   boundaries[off] |= 1;
   const uint8_t *ip = f->code + off;
   
@@ -88,14 +91,107 @@ static bool jit_inline_note_instruction(const sv_func_t *f, int off, int size, u
   int delta = (flags & SV_OPF_JIT_BRANCH32) ? sv_get_i32(ip + 1) : sv_get_i8(ip + 1);
   int next = off + size;
   
-  if (delta < 0 || delta >= f->code_len - next) return false;
-  boundaries[next + delta] |= 2;
+  int64_t target = (int64_t)next + delta;
+  if ((!allow_backedge && delta < 0) || target < 0 || target >= f->code_len) return false;
+  boundaries[target] |= 2;
   
   return true;
 }
 
 static bool jit_inline_targets_aligned(const uint8_t *boundaries, int len) {
   for (int off = 0; off < len; off++) if (boundaries[off] == 2) return false;
+  return true;
+}
+
+static bool jit_inline_has_loop(const sv_func_t *f) {
+  for (int pc = 0; pc < f->code_len;) {
+    unsigned op = f->code[pc];
+    int size = op < OP__COUNT ? sv_op_size[op] : 0;
+    if (!size || pc + size > f->code_len) return false;
+    uint16_t flags = sv_op_flags[op];
+    if ((flags & SV_OPF_JIT_BRANCH32) && sv_get_i32(f->code + pc + 1) < 0) return true;
+    if ((flags & SV_OPF_JIT_BRANCH8) && sv_get_i8(f->code + pc + 1) < 0) return true;
+    pc += size;
+  }
+  return false;
+}
+
+// Field-walking loops can execute effects on earlier iterations. Every read
+// therefore uses the non-restarting helper; reject operations whose guards
+// could restart the callee, plus coercive equality except the nullish case.
+static bool jit_inline_loop_op(sv_op_t op, sv_op_t previous, bool target) {
+  if (op == OP_EQ || op == OP_NE) return previous == OP_NULL && !target;
+  switch (op) {
+    case OP_THIS: case OP_GET_ARG: case OP_PUT_ARG: case OP_SET_ARG:
+    case OP_GET_LOCAL: case OP_GET_LOCAL8:
+    case OP_PUT_LOCAL: case OP_PUT_LOCAL8: case OP_SET_LOCAL: case OP_SET_LOCAL8:
+    case OP_CONST: case OP_CONST8: case OP_CONST_I8:
+    case OP_NULL: case OP_UNDEF: case OP_TRUE: case OP_FALSE:
+    case OP_GET_FIELD: case OP_GET_FIELD2: case OP_GET_FIELD_OPT: case OP_PUT_FIELD:
+    case OP_DUP: case OP_DUP2: case OP_POP: case OP_NIP: case OP_INSERT2: case OP_INSERT3:
+    case OP_SEQ: case OP_SNE: case OP_IS_UNDEF: case OP_IS_NULL: case OP_IS_UNDEF_OR_NULL:
+    case OP_JMP: case OP_JMP_TRUE: case OP_JMP_FALSE:
+    case OP_JMP_TRUE8: case OP_JMP_FALSE8:
+    case OP_JMP_TRUE_PEEK: case OP_JMP_FALSE_PEEK: case OP_JMP_NOT_NULLISH:
+    case OP_RETURN: case OP_RETURN_UNDEF: case OP_NOP: case OP_LINE_NUM: case OP_COL_NUM: case OP_LABEL:
+      return true;
+    default: return false;
+  }
+}
+
+// Forward control flow is a DAG: propagate the may-have-effect bit with OR.
+// A loop uses the stricter field-walk policy and is effectful from entry, so a
+// later iteration can never restart work already performed by an earlier one.
+// Numeric equality is pure only because its inline fallback bails before
+// coercion when no effect has occurred. Nullish equality never coerces.
+static bool jit_inline_effect_map(const sv_func_t *f, uint8_t *states) {
+  memset(states, 0, (size_t)f->code_len + 1);
+  if (jit_inline_has_loop(f)) {
+    memset(states, 2, (size_t)f->code_len + 1);
+    return true;
+  }
+  uint8_t targets[JIT_INLINE_MAX_BYTECODE + 1] = {0};
+  for (int pc = 0; pc < f->code_len;) {
+    unsigned op = f->code[pc];
+    int size = op < OP__COUNT ? sv_op_size[op] : 0;
+    if (!size || pc + size > f->code_len) return false;
+    uint16_t flags = sv_op_flags[op];
+    if (flags & (SV_OPF_JIT_BRANCH32 | SV_OPF_JIT_BRANCH8)) {
+      int64_t target = pc + size + (int64_t)((flags & SV_OPF_JIT_BRANCH32)
+          ? sv_get_i32(f->code + pc + 1) : sv_get_i8(f->code + pc + 1));
+      if (target < pc + size || target >= f->code_len) return false;
+      targets[target] = 1;
+    }
+    pc += size;
+  }
+  states[0] = 1;
+  sv_op_t previous = OP_INVALID;
+  for (int pc = 0; pc < f->code_len;) {
+    unsigned op = f->code[pc];
+    int size = op < OP__COUNT ? sv_op_size[op] : 0;
+    if (!size || pc + size > f->code_len) return false;
+    uint8_t outgoing = states[pc];
+    bool effect = jit_op_inline_side_effect(op);
+    if (op == OP_EQ || op == OP_NE) {
+      const uint8_t *fb = sv_func_type_feedback(f);
+      bool numeric = fb && sv_tfb_specialization_ready(fb[pc]) &&
+                     (fb[pc] & SV_TFB_CLASS_MASK) == SV_TFB_NUM;
+      if ((previous != OP_NULL || targets[pc]) && !numeric) effect = true;
+    }
+    if (outgoing && effect) outgoing = 2;
+    uint16_t flags = sv_op_flags[op];
+    if (flags & (SV_OPF_JIT_BRANCH32 | SV_OPF_JIT_BRANCH8)) {
+      int64_t target = pc + size + (int64_t)((flags & SV_OPF_JIT_BRANCH32)
+          ? sv_get_i32(f->code + pc + 1) : sv_get_i8(f->code + pc + 1));
+      if (target < pc + size || target >= f->code_len) return false;
+      states[target] |= outgoing;
+    }
+    if (op != OP_JMP && op != OP_JMP8 && op != OP_RETURN && op != OP_RETURN_UNDEF &&
+        op != OP_TAIL_CALL && op != OP_TAIL_CALL_METHOD)
+      states[pc + size] |= outgoing;
+    previous = op;
+    pc += size;
+  }
   return true;
 }
 
@@ -110,9 +206,13 @@ bool jit_inlineable(sv_func_t *f) {
   uint8_t boundaries[JIT_INLINE_MAX_BYTECODE] = {0};
   uint8_t *ip = f->code;
   uint8_t *end = f->code + f->code_len;
-  bool seen_effect = false;
+  uint8_t effects[JIT_INLINE_MAX_BYTECODE + 1];
+  if (!jit_inline_effect_map(f, effects)) return false;
+  bool has_loop = jit_inline_has_loop(f);
+  sv_op_t previous = OP_INVALID;
 
   while (ip < end) {
+    bool seen_effect = (effects[ip - f->code] & 2) != 0;
     sv_op_t op = (sv_op_t)*ip;
     if (op >= OP__COUNT) return false;
     
@@ -121,7 +221,7 @@ bool jit_inlineable(sv_func_t *f) {
 
     uint16_t flags = sv_op_flags[op];
     if ((flags & SV_OPF_JIT_INLINEABLE) == 0) return false;
-    if (!jit_inline_note_instruction(f, (int)(ip - f->code), sz, boundaries)) return false;
+    if (!jit_inline_note_instruction(f, (int)(ip - f->code), sz, boundaries, true)) return false;
 
     if (op == OP_PUT_ARG || op == OP_SET_ARG) {
       uint16_t idx = sv_get_u16(ip + 1);
@@ -136,19 +236,22 @@ bool jit_inlineable(sv_func_t *f) {
     // with matching lifetime and semantics.
     if (op == OP_SPECIAL_OBJ && sv_get_u8(ip + 1) == 0) return false;
 
-    // These guards branch to the shared slow path, which invokes the whole
-    // callee. Never emit them after an operation that may already have had an
-    // observable effect.
-    if (seen_effect && jit_op_inline_restarts_callee_on_guard_failure(op)) return false;
-
-    if (seen_effect)
-      if (op != OP_JMP && !jit_op_inline_after_effect(op) && !jit_op_inline_side_effect(op)) return false;
-
-    if (jit_op_inline_side_effect(op)) seen_effect = true;
+    if (has_loop) {
+      if (!jit_inline_loop_op(op, previous, boundaries[ip - f->code] & 2)) return false;
+    } else {
+      // These guards can invoke the whole callee again on failure.
+      if (seen_effect && jit_op_inline_restarts_callee_on_guard_failure(op)) return false;
+      if (seen_effect && op != OP_JMP && !jit_op_inline_after_effect(op) && !jit_op_inline_side_effect(op))
+        return false;
+    }
+    previous = op;
     ip += sz;
   }
 
-  return jit_inline_targets_aligned(boundaries, f->code_len);
+  if (!jit_inline_targets_aligned(boundaries, f->code_len)) return false;
+  if (has_loop) for (int pc = 0; pc < f->code_len; pc += sv_op_size[f->code[pc]])
+    if ((f->code[pc] == OP_EQ || f->code[pc] == OP_NE) && (boundaries[pc] & 2)) return false;
+  return true;
 }
 
 // Track params, locals and stack slots: uint8_t 0 = no alias, 1 = may alias a reused object.
@@ -174,7 +277,7 @@ static bool jit_analyze_empty_object_reuse(sv_func_t *f) {
     int size = sv_op_size[op];
     if (!size || off + size > f->code_len
       || jit_op_inline_side_effect(op)) return false;
-    if (!jit_inline_note_instruction(f, off, size, boundaries)) return false;
+    if (!jit_inline_note_instruction(f, off, size, boundaries, false)) return false;
     off += size;
   }
   if (!jit_inline_targets_aligned(boundaries, f->code_len)) return false;
@@ -605,16 +708,30 @@ void jit_emit_inline_body(
   int inl_upval_n = 0;
 
   inl_label_map_t inl_lm = {.count = 0};
+  bool has_loop = jit_inline_has_loop(callee);
+  if (has_loop) for (int pc = 0; pc < callee->code_len; pc += sv_op_size[callee->code[pc]]) {
+    uint16_t flags = sv_op_flags[callee->code[pc]];
+    if (!(flags & (SV_OPF_JIT_BRANCH32 | SV_OPF_JIT_BRANCH8))) continue;
+    int delta = (flags & SV_OPF_JIT_BRANCH32) ? sv_get_i32(callee->code + pc + 1) : sv_get_i8(callee->code + pc + 1);
+    MIR_label_t label = inl_label_for_offset(ctx, &inl_lm, pc + sv_op_size[callee->code[pc]] + delta, -1);
+    ANT_ASSERT(label, "inline loop label map exhausted");
+  }
 
   uint8_t *code_base = callee->code;
   uint8_t *ip = callee->code;
   uint8_t *end = callee->code + callee->code_len;
-  bool seen_effect = false;
+  uint8_t effects[JIT_INLINE_MAX_BYTECODE + 1];
+  bool effects_ok = jit_inline_effect_map(callee, effects);
+  ANT_ASSERT(effects_ok, "invalid inline effect graph");
+  bool seen_effect = false, any_effect = false;
+  sv_op_t previous_op = OP_INVALID;
 
   while (ip < end) {
     sv_op_t op = (sv_op_t)*ip;
     int sz = sv_op_size[op];
     int inl_bc_off = (int)(ip - code_base);
+    seen_effect = (effects[inl_bc_off] & 2) != 0;
+    any_effect |= seen_effect || jit_op_inline_side_effect(op);
 
     int label_sp = -1;
     MIR_label_t target_lbl = inl_label_lookup(&inl_lm, inl_bc_off, &label_sp);
@@ -622,6 +739,7 @@ void jit_emit_inline_body(
       INL_FLUSH_ALL();
       MIR_append_insn(ctx, jit_func, target_lbl);
       if (label_sp >= 0) isp = label_sp;
+      else (void)inl_label_for_offset(ctx, &inl_lm, inl_bc_off, isp);
       memset(inl_num, 0, (size_t)inl_max_stack);
     }
 
@@ -915,7 +1033,7 @@ void jit_emit_inline_body(
         ANT_ASSERT(isp >= 2, "invalid inline stack depth");
         INL_FLUSH_ALL();
         char tn[32];
-        snprintf(tn, sizeof(tn), "inl%d_ins2t", id);
+        snprintf(tn, sizeof(tn), "inl%d_ins2t_%d", id, inl_bc_off);
         MIR_reg_t r_t = MIR_new_func_reg(ctx, jit_func->u.func, MIR_JSVAL, tn);
         MIR_reg_t r_a = inl_vs[isp - 1];
         MIR_reg_t r_obj = inl_vs[isp - 2];
@@ -942,7 +1060,7 @@ void jit_emit_inline_body(
         ANT_ASSERT(isp >= 3, "invalid inline stack depth");
         INL_FLUSH_ALL();
         char tn[32];
-        snprintf(tn, sizeof(tn), "inl%d_ins3t", id);
+        snprintf(tn, sizeof(tn), "inl%d_ins3t_%d", id, inl_bc_off);
         MIR_reg_t r_t = MIR_new_func_reg(ctx, jit_func->u.func, MIR_JSVAL, tn);
         MIR_reg_t r_a = inl_vs[isp - 1];
         MIR_reg_t r_prop = inl_vs[isp - 2];
@@ -1289,12 +1407,32 @@ void jit_emit_inline_body(
       case OP_SNE:
       case OP_EQ:
       case OP_NE: {
+        if ((op == OP_EQ || op == OP_NE) && previous_op == OP_NULL && !target_lbl) {
+          INL_FLUSH_SLOT(isp - 2);
+          MIR_reg_t left = inl_vs[isp - 2];
+          isp -= 2;
+          MIR_reg_t dst = inl_vs[isp++];
+          MIR_label_t nullish = MIR_new_label(ctx), done = MIR_new_label(ctx);
+          MIR_append_insn(ctx, jit_func, MIR_new_insn(ctx, MIR_BEQ, MIR_new_label_op(ctx, nullish),
+              MIR_new_reg_op(ctx, left), MIR_new_uint_op(ctx, js_mknull())));
+          MIR_append_insn(ctx, jit_func, MIR_new_insn(ctx, MIR_BEQ, MIR_new_label_op(ctx, nullish),
+              MIR_new_reg_op(ctx, left), MIR_new_uint_op(ctx, js_mkundef())));
+          mir_load_imm(ctx, jit_func, dst, op == OP_EQ ? js_false : js_true);
+          MIR_append_insn(ctx, jit_func, MIR_new_insn(ctx, MIR_JMP, MIR_new_label_op(ctx, done)));
+          MIR_append_insn(ctx, jit_func, nullish);
+          mir_load_imm(ctx, jit_func, dst, op == OP_EQ ? js_true : js_false);
+          MIR_append_insn(ctx, jit_func, done);
+          inl_num[isp - 1] = inl_num[isp] = 0;
+          break;
+        }
         uint8_t feedback = sv_func_type_feedback(callee)
                                ? sv_func_type_feedback(callee)[inl_bc_off]
                                : 0;
-        bool reader_coercion = ext->reader_only && (op == OP_EQ || op == OP_NE);
-        if (reader_coercion || (sv_tfb_specialization_ready(feedback) &&
-            (feedback & SV_TFB_CLASS_MASK) == SV_TFB_NUM)) {
+        bool numeric_equality = sv_tfb_specialization_ready(feedback) &&
+            (feedback & SV_TFB_CLASS_MASK) == SV_TFB_NUM;
+        bool reader_coercion = (ext->reader_only || (!seen_effect && numeric_equality)) &&
+            (op == OP_EQ || op == OP_NE);
+        if (reader_coercion || numeric_equality) {
           int right_idx = isp - 1;
           int left_idx = isp - 2;
           MIR_reg_t rr = inl_vs[right_idx];
@@ -2154,8 +2292,9 @@ void jit_emit_inline_body(
         ANT_ASSERT(false, "inlineable opcode has no emitter");
     }
     if (jit_op_inline_side_effect(op)) seen_effect = true;
+    previous_op = op;
     ip += sz;
   }
   
-  ANT_ASSERT(!reuse_empty_objects || !seen_effect, "empty object reuse requires an effect-free inline body");
+  ANT_ASSERT(!reuse_empty_objects || !any_effect, "empty object reuse requires an effect-free inline body");
 }

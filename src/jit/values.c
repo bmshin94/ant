@@ -109,6 +109,7 @@ jit_value_info_t vstack_value_info(const jit_vstack_t *vs, int idx) {
   }
   if (vs->known_bool) info.known_bool = vs->known_bool[idx];
   if (vs->integer_range) info.integer_range = vs->integer_range[idx];
+  if (vs->parameter_origin) info.parameter_origin = vs->parameter_origin[idx];
   return info;
 }
 
@@ -121,6 +122,7 @@ void vstack_set_value_info(
   }
   if (vs->known_bool) vs->known_bool[idx] = info.known_bool;
   if (vs->integer_range) vs->integer_range[idx] = info.integer_range;
+  if (vs->parameter_origin) vs->parameter_origin[idx] = info.parameter_origin;
 }
 
 void vstack_clear_value_info(jit_vstack_t *vs, int idx) {
@@ -966,11 +968,13 @@ MIR_reg_t mir_emit_known_array_index_guard(
   return integer;
 }
 
-MIR_reg_t mir_emit_dense_element_guard(
+MIR_reg_t mir_emit_dense_element_guard_with_fact(
     MIR_context_t ctx, MIR_item_t fn,
     MIR_reg_t object, MIR_reg_t index, MIR_reg_t value,
-    jit_element_access_t access, MIR_label_t slow, int site) {
+    jit_element_access_t access, MIR_label_t slow, int site,
+    jit_array_guard_fact_t *fact) {
   bool writable = access == JIT_ELEMENT_WRITE;
+  bool reuse = fact && fact->data && (!writable || fact->writable);
   char tag_name[48], ptr_name[48], flags_name[48];
   char data_name[48], len_name[48];
   snprintf(tag_name, sizeof(tag_name), "elem_tag_%d", site);
@@ -982,52 +986,55 @@ MIR_reg_t mir_emit_dense_element_guard(
   MIR_reg_t tag = MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, tag_name);
   MIR_reg_t ptr = MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, ptr_name);
   MIR_reg_t flags = MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, flags_name);
-  MIR_reg_t data = MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, data_name);
-  MIR_reg_t len = MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, len_name);
+  MIR_reg_t data = reuse ? fact->data : MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, data_name);
+  MIR_reg_t len = reuse ? fact->length : MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, len_name);
 
-  MIR_append_insn(ctx, fn,
-                  MIR_new_insn(ctx, MIR_URSH,
-                               MIR_new_reg_op(ctx, tag),
-                               MIR_new_reg_op(ctx, object),
-                               MIR_new_uint_op(ctx, NANBOX_TYPE_SHIFT)));
-  MIR_append_insn(ctx, fn,
-                  MIR_new_insn(ctx, MIR_BNE,
-                               MIR_new_label_op(ctx, slow),
-                               MIR_new_reg_op(ctx, tag),
-                               MIR_new_uint_op(ctx, NANBOX_TARR_TAG)));
-  mir_emit_decode_ref(ctx, fn, ptr, object);
-  MIR_append_insn(ctx, fn,
-                  MIR_new_insn(ctx, MIR_MOV,
-                               MIR_new_reg_op(ctx, flags),
-                               MIR_new_mem_op(ctx, MIR_T_U32,
-                                              (MIR_disp_t)offsetof(ant_object_t, flags), ptr, 0, 1)));
-  MIR_append_insn(ctx, fn,
-                  MIR_new_insn(ctx, MIR_AND,
-                               MIR_new_reg_op(ctx, tag),
-                               MIR_new_reg_op(ctx, flags),
-                               MIR_new_uint_op(ctx,
-                                               ANT_OBJECT_FLAG_EXOTIC | ANT_OBJECT_FLAG_FAST_ARRAY | ANT_OBJECT_FLAG_DENSE_LENGTH_FITS |
-                                                   (writable ? ANT_OBJECT_FLAG_FROZEN | ANT_OBJECT_FLAG_COW_ELEMENTS : 0))));
-  MIR_append_insn(ctx, fn,
-                  MIR_new_insn(ctx, MIR_BNE,
-                               MIR_new_label_op(ctx, slow),
-                               MIR_new_reg_op(ctx, tag),
-                               MIR_new_uint_op(ctx, ANT_OBJECT_FLAG_FAST_ARRAY | ANT_OBJECT_FLAG_DENSE_LENGTH_FITS)));
-  MIR_append_insn(ctx, fn,
-                  MIR_new_insn(ctx, MIR_MOV,
-                               MIR_new_reg_op(ctx, data),
-                               MIR_new_mem_op(ctx, MIR_T_P,
-                                              (MIR_disp_t)offsetof(ant_object_t, u.array.data), ptr, 0, 1)));
-  MIR_append_insn(ctx, fn,
-                  MIR_new_insn(ctx, MIR_BEQ,
-                               MIR_new_label_op(ctx, slow),
-                               MIR_new_reg_op(ctx, data),
-                               MIR_new_int_op(ctx, 0)));
-  MIR_append_insn(ctx, fn,
-                  MIR_new_insn(ctx, MIR_MOV,
-                               MIR_new_reg_op(ctx, len),
-                               MIR_new_mem_op(ctx, MIR_T_U32,
-                                              (MIR_disp_t)offsetof(ant_object_t, u.array.len), ptr, 0, 1)));
+  if (!reuse) {
+    MIR_append_insn(ctx, fn,
+                    MIR_new_insn(ctx, MIR_URSH,
+                                 MIR_new_reg_op(ctx, tag),
+                                 MIR_new_reg_op(ctx, object),
+                                 MIR_new_uint_op(ctx, NANBOX_TYPE_SHIFT)));
+    MIR_append_insn(ctx, fn,
+                    MIR_new_insn(ctx, MIR_BNE,
+                                 MIR_new_label_op(ctx, slow),
+                                 MIR_new_reg_op(ctx, tag),
+                                 MIR_new_uint_op(ctx, NANBOX_TARR_TAG)));
+    mir_emit_decode_ref(ctx, fn, ptr, object);
+    MIR_append_insn(ctx, fn,
+                    MIR_new_insn(ctx, MIR_MOV,
+                                 MIR_new_reg_op(ctx, flags),
+                                 MIR_new_mem_op(ctx, MIR_T_U32,
+                                                (MIR_disp_t)offsetof(ant_object_t, flags), ptr, 0, 1)));
+    MIR_append_insn(ctx, fn,
+                    MIR_new_insn(ctx, MIR_AND,
+                                 MIR_new_reg_op(ctx, tag),
+                                 MIR_new_reg_op(ctx, flags),
+                                 MIR_new_uint_op(ctx,
+                                                 ANT_OBJECT_FLAG_EXOTIC | ANT_OBJECT_FLAG_FAST_ARRAY | ANT_OBJECT_FLAG_DENSE_LENGTH_FITS |
+                                                     (writable ? ANT_OBJECT_FLAG_FROZEN | ANT_OBJECT_FLAG_COW_ELEMENTS : 0))));
+    MIR_append_insn(ctx, fn,
+                    MIR_new_insn(ctx, MIR_BNE,
+                                 MIR_new_label_op(ctx, slow),
+                                 MIR_new_reg_op(ctx, tag),
+                                 MIR_new_uint_op(ctx, ANT_OBJECT_FLAG_FAST_ARRAY | ANT_OBJECT_FLAG_DENSE_LENGTH_FITS)));
+    MIR_append_insn(ctx, fn,
+                    MIR_new_insn(ctx, MIR_MOV,
+                                 MIR_new_reg_op(ctx, data),
+                                 MIR_new_mem_op(ctx, MIR_T_P,
+                                                (MIR_disp_t)offsetof(ant_object_t, u.array.data), ptr, 0, 1)));
+    MIR_append_insn(ctx, fn,
+                    MIR_new_insn(ctx, MIR_BEQ,
+                                 MIR_new_label_op(ctx, slow),
+                                 MIR_new_reg_op(ctx, data),
+                                 MIR_new_int_op(ctx, 0)));
+    MIR_append_insn(ctx, fn,
+                    MIR_new_insn(ctx, MIR_MOV,
+                                 MIR_new_reg_op(ctx, len),
+                                 MIR_new_mem_op(ctx, MIR_T_U32,
+                                                  (MIR_disp_t)offsetof(ant_object_t, u.array.len), ptr, 0, 1)));
+    if (fact) *fact = (jit_array_guard_fact_t){data, len, writable};
+  }
   MIR_append_insn(ctx, fn,
                   MIR_new_insn(ctx, MIR_UBGE,
                                MIR_new_label_op(ctx, slow),
@@ -1046,6 +1053,13 @@ MIR_reg_t mir_emit_dense_element_guard(
   }
 
   return data;
+}
+
+MIR_reg_t mir_emit_dense_element_guard(
+    MIR_context_t ctx, MIR_item_t fn,
+    MIR_reg_t object, MIR_reg_t index, MIR_reg_t value,
+    jit_element_access_t access, MIR_label_t slow, int site) {
+  return mir_emit_dense_element_guard_with_fact(ctx, fn, object, index, value, access, slow, site, NULL);
 }
 
 void mir_emit_word32_binary(

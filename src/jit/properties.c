@@ -485,28 +485,6 @@ static void mir_emit_get_field_kind_epoch_guard(
   MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BNE,
       MIR_new_label_op(ctx, slow), MIR_new_reg_op(ctx, kind_reg), MIR_new_int_op(ctx, expected_kind)));
 
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-  if (expected_kind == SV_GF_IC_OWN) {
-    uint32_t index = ic->cached_index;
-    // Index and epoch are adjacent words: one aligned 64-bit load compares both
-    // against (global_epoch << 32 | index).
-    static_assert(offsetof(sv_ic_entry_t, epoch) == offsetof(sv_ic_entry_t, cached_index) + 4,
-                  "field IC index and epoch must be adjacent");
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV,
-        MIR_new_reg_op(ctx, tmp),
-        MIR_new_mem_op(ctx, MIR_T_U64, offsetof(sv_ic_entry_t, cached_index), cache, 0, 1)));
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV,
-        MIR_new_reg_op(ctx, expect), MIR_new_mem_op(ctx, MIR_T_U32, 0, r_global_epoch, 0, 1)));
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_LSH,
-        MIR_new_reg_op(ctx, expect), MIR_new_reg_op(ctx, expect), MIR_new_int_op(ctx, 32)));
-    if (index != 0)
-      MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_OR,
-          MIR_new_reg_op(ctx, expect), MIR_new_reg_op(ctx, expect), MIR_new_uint_op(ctx, index)));
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BNE,
-        MIR_new_label_op(ctx, slow), MIR_new_reg_op(ctx, tmp), MIR_new_reg_op(ctx, expect)));
-    return;
-  }
-#endif
   MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV,
       MIR_new_reg_op(ctx, tmp),
       MIR_new_mem_op(ctx, MIR_T_U32, offsetof(sv_ic_entry_t, epoch), cache, 0, 1)));
@@ -514,14 +492,6 @@ static void mir_emit_get_field_kind_epoch_guard(
       MIR_new_reg_op(ctx, expect), MIR_new_mem_op(ctx, MIR_T_U32, 0, r_global_epoch, 0, 1)));
   MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BNE,
       MIR_new_label_op(ctx, slow), MIR_new_reg_op(ctx, tmp), MIR_new_reg_op(ctx, expect)));
-  if (expected_kind == SV_GF_IC_OWN) {
-    uint32_t index = ic->cached_index;
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV,
-        MIR_new_reg_op(ctx, tmp),
-        MIR_new_mem_op(ctx, MIR_T_U32, offsetof(sv_ic_entry_t, cached_index), cache, 0, 1)));
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BNE,
-        MIR_new_label_op(ctx, slow), MIR_new_reg_op(ctx, tmp), MIR_new_uint_op(ctx, index)));
-  }
 }
 
 static bool mir_emit_get_field_own_slot_fastpath(
@@ -538,8 +508,8 @@ static bool mir_emit_get_field_own_slot_fastpath(
   MIR_reg_t ptr = mir_new_ic_reg(ctx, fn, "gf_own", "obj", bc_off, ic_idx);
   MIR_reg_t tmp = mir_new_ic_reg(ctx, fn, "gf_own", "tmp", bc_off, ic_idx);
   MIR_reg_t expect = mir_new_ic_reg(ctx, fn, "gf_own", "expect", bc_off, ic_idx);
-  uint32_t index = ic->cached_index;
-  uint8_t inobj_limit = ant_shape_get_inobj_limit(ic->cached_shape);
+  MIR_reg_t index = mir_new_ic_reg(ctx, fn, "gf_own", "index", bc_off, ic_idx);
+  MIR_reg_t limit = mir_new_ic_reg(ctx, fn, "gf_own", "limit", bc_off, ic_idx);
 
   mir_emit_get_field_kind_epoch_guard(
       ctx, fn, ic, SV_GF_IC_OWN, cache, tmp, tmp, expect, r_global_epoch, slow);
@@ -553,34 +523,35 @@ static bool mir_emit_get_field_own_slot_fastpath(
       MIR_new_mem_op(ctx, MIR_T_P, offsetof(sv_ic_entry_t, cached_shape), cache, 0, 1)));
   MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BNE,
       MIR_new_label_op(ctx, slow), MIR_new_reg_op(ctx, tmp), MIR_new_reg_op(ctx, expect)));
-  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV,
-      MIR_new_reg_op(ctx, tmp),
+  // The snapshot above pins one shape, but this fallback must follow the
+  // mutable IC. Shared reader functions can learn different slot indices in
+  // different callers; baking the old index would force permanent C fallback.
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, index),
+      MIR_new_mem_op(ctx, MIR_T_U32, offsetof(sv_ic_entry_t, cached_index), cache, 0, 1)));
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, tmp),
       MIR_new_mem_op(ctx, MIR_T_U32, offsetof(ant_object_t, prop_count), ptr, 0, 1)));
-  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_UBLE,
-      MIR_new_label_op(ctx, slow), MIR_new_reg_op(ctx, tmp), MIR_new_uint_op(ctx, index)));
-  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV,
-      MIR_new_reg_op(ctx, tmp),
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_UBGE, MIR_new_label_op(ctx, slow),
+      MIR_new_reg_op(ctx, index), MIR_new_reg_op(ctx, tmp)));
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, limit),
       MIR_new_mem_op(ctx, MIR_T_U8, offsetof(ant_object_t, inobj_limit), ptr, 0, 1)));
-  if (index < inobj_limit) {
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_UBLE,
-        MIR_new_label_op(ctx, slow), MIR_new_reg_op(ctx, tmp), MIR_new_uint_op(ctx, index)));
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV,
-        MIR_new_reg_op(ctx, dst), MIR_new_mem_op(ctx, MIR_T_I64,
-            offsetof(ant_object_t, inobj) + index * sizeof(ant_value_t), ptr, 0, 1)));
-  } else {
-    // The overflow offset depends on the allocation's inline capacity as
-    // well as the property index. Guard both before using a constant offset.
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BNE,
-        MIR_new_label_op(ctx, slow), MIR_new_reg_op(ctx, tmp), MIR_new_uint_op(ctx, inobj_limit)));
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV,
-        MIR_new_reg_op(ctx, tmp),
-        MIR_new_mem_op(ctx, MIR_T_P, offsetof(ant_object_t, overflow_prop), ptr, 0, 1)));
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BEQ,
-        MIR_new_label_op(ctx, slow), MIR_new_reg_op(ctx, tmp), MIR_new_int_op(ctx, 0)));
-    MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV,
-        MIR_new_reg_op(ctx, dst), MIR_new_mem_op(ctx, MIR_T_I64,
-            (index - inobj_limit) * sizeof(ant_value_t), tmp, 0, 1)));
-  }
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_UBGT, MIR_new_label_op(ctx, slow),
+      MIR_new_reg_op(ctx, limit), MIR_new_uint_op(ctx, ANT_INOBJ_MAX_SLOTS)));
+  MIR_label_t overflow = MIR_new_label(ctx), done = MIR_new_label(ctx);
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_UBGE, MIR_new_label_op(ctx, overflow),
+      MIR_new_reg_op(ctx, index), MIR_new_reg_op(ctx, limit)));
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, dst),
+      MIR_new_mem_op(ctx, MIR_JSVAL, offsetof(ant_object_t, inobj), ptr, index, sizeof(ant_value_t))));
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_JMP, MIR_new_label_op(ctx, done)));
+  MIR_append_insn(ctx, fn, overflow);
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_SUB, MIR_new_reg_op(ctx, index),
+      MIR_new_reg_op(ctx, index), MIR_new_reg_op(ctx, limit)));
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, tmp),
+      MIR_new_mem_op(ctx, MIR_T_P, offsetof(ant_object_t, overflow_prop), ptr, 0, 1)));
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BEQ, MIR_new_label_op(ctx, slow),
+      MIR_new_reg_op(ctx, tmp), MIR_new_int_op(ctx, 0)));
+  MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, dst),
+      MIR_new_mem_op(ctx, MIR_JSVAL, 0, tmp, index, sizeof(ant_value_t))));
+  MIR_append_insn(ctx, fn, done);
   return true;
 }
 

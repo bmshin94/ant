@@ -83,6 +83,7 @@ typedef struct jit_compile {
   MIR_item_t destructure_close_proto;
   MIR_item_t destructure_next_proto;
   MIR_item_t imp_add;
+  MIR_item_t call_target_proto, imp_record_call_target;
   MIR_item_t imp_add_at_site;
   MIR_item_t concat_site_proto;
   MIR_item_t imp_sub;
@@ -286,6 +287,8 @@ typedef struct jit_compile {
   bool forward_arguments;
   bool cold_tier;
   bool element_available;
+  // Compiler facts within one straight-line region, never a runtime memo table.
+  jit_array_guard_fact_t array_guards[SV_JIT_ARGS_BUF_CAP];
   bool ok;
   int call_n;
   int upval_n;

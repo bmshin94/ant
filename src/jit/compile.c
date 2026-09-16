@@ -96,6 +96,38 @@ sv_jit_func_t sv_jit_compile(ant_t *js, sv_func_t *func, sv_closure_t *hint_clos
   return sv_jit_compile_tier(js, func, hint_closure, SV_JIT_TIER_AUTO);
 }
 
+// Array headers remain valid through pure operations and checked numeric
+// element stores. Calls (including helper slow arms), effects and joins discard
+// both the facts and origins of suspended values, so an argument changed by a
+// callback cannot be confused with its former value still on the value stack.
+static void jit_forget_array_guards(jit_compile_t *c) {
+  memset(c->array_guards, 0, sizeof(c->array_guards));
+  if (c->vs.parameter_origin) memset(c->vs.parameter_origin, 0, (size_t)c->vs.max);
+}
+
+static bool jit_preserves_array_guards(sv_op_t op) {
+  switch (op) {
+    case OP_CONST: case OP_CONST8: case OP_CONST_I8:
+    case OP_UNDEF: case OP_NULL: case OP_TRUE: case OP_FALSE: case OP_THIS:
+    case OP_GET_ARG: case OP_GET_UPVAL:
+    case OP_GET_LOCAL: case OP_GET_LOCAL8:
+    case OP_PUT_LOCAL: case OP_PUT_LOCAL8: case OP_SET_LOCAL: case OP_SET_LOCAL8:
+    case OP_INC_LOCAL: case OP_DEC_LOCAL: case OP_ADD_LOCAL:
+    case OP_DUP: case OP_DUP2: case OP_POP: case OP_NIP: case OP_NIP2:
+    case OP_SWAP: case OP_ROT3L: case OP_ROT3R: case OP_SWAP_UNDER:
+    case OP_INSERT2: case OP_INSERT3:
+    case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
+    case OP_ADD_NUM: case OP_SUB_NUM: case OP_MUL_NUM: case OP_DIV_NUM:
+    case OP_BAND: case OP_BOR: case OP_BXOR: case OP_SHL: case OP_SHR: case OP_USHR:
+    case OP_NEG: case OP_UPLUS: case OP_BNOT: case OP_NOT:
+    case OP_INC: case OP_DEC: case OP_POST_INC: case OP_POST_DEC:
+    case OP_GET_ELEM: case OP_PUT_ELEM:
+    case OP_NOP: case OP_LINE_NUM: case OP_COL_NUM:
+      return true;
+    default: return false;
+  }
+}
+
 sv_jit_func_t sv_jit_compile_tier(ant_t *js, sv_func_t *func, sv_closure_t *hint_closure, sv_jit_tier_t tier) {
   struct timespec compile_t0;
   clock_gettime(CLOCK_MONOTONIC, &compile_t0);
@@ -158,6 +190,7 @@ sv_jit_func_t sv_jit_compile_tier(ant_t *js, sv_func_t *func, sv_closure_t *hint
       if (c->lm.entries[i].bc_off == c->bc_off) {
         vstack_flush_to_boxed(&c->vs, c->ctx, c->jit_func, c->r_d_slot);
         c->element_available = false;
+        jit_forget_array_guards(c);
         c->previous_ip = NULL;
         if (c->integer_locals) {
           for (int li = 0; li < c->n_locals; li++)
@@ -404,9 +437,32 @@ sv_jit_func_t sv_jit_compile_tier(ant_t *js, sv_func_t *func, sv_closure_t *hint
         break;
     }
 
+    if (!jit_preserves_array_guards(c->op)) jit_forget_array_guards(c);
+    // Origin means identity, not merely that a value depends on an argument.
+    // In-place arithmetic and predicates must not leave the input's origin on
+    // their newly produced value. Stack transfers and retained stores preserve it.
+    switch (c->op) {
+      case OP_DUP: case OP_DUP2: case OP_SWAP: case OP_SWAP_UNDER:
+      case OP_ROT3L: case OP_ROT3R: case OP_NIP: case OP_NIP2:
+      case OP_INSERT2: case OP_INSERT3: case OP_SET_LOCAL: case OP_SET_LOCAL8:
+        break;
+      default: {
+        int pops, pushes;
+        if (!sv_op_stack_effect(c->func, c->ip, &pops, &pushes) || pushes > c->vs.sp)
+          jit_forget_array_guards(c);
+        else for (int i = c->vs.sp - pushes; i < c->vs.sp; i++) c->vs.parameter_origin[i] = 0;
+        break;
+      }
+    }
+    if (c->op == OP_GET_ARG && c->vs.sp > 0) {
+      unsigned index = sv_get_u16(c->ip + 1);
+      if (index < SV_JIT_ARGS_BUF_CAP) c->vs.parameter_origin[c->vs.sp - 1] = (uint8_t)(index + 1);
+    }
+
     for (MIR_insn_t insn = DLIST_NEXT(MIR_insn_t, c->previous_insn); insn;
          insn = DLIST_NEXT(MIR_insn_t, insn)) {
       if (c->op != OP_GET_ELEM && MIR_call_code_p(insn->code)) c->element_available = false;
+      if (MIR_call_code_p(insn->code)) jit_forget_array_guards(c);
       for (size_t oi = 0; oi < MIR_insn_nops(c->ctx, insn); oi++) {
         int output = 0;
         (void)MIR_insn_op_mode(c->ctx, insn, oi, &output);
@@ -460,6 +516,7 @@ sv_jit_func_t sv_jit_compile_tier(ant_t *js, sv_func_t *func, sv_closure_t *hint
   free(c->vs.has_const);
   free(c->vs.known_bool);
   free(c->vs.integer_range);
+  free(c->vs.parameter_origin);
   free(c->local_regs);
   free(c->integer_locals);
   free(c->local_by_reg);

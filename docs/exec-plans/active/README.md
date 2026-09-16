@@ -8,6 +8,8 @@ Store in-progress execution plans here.
 
 ## Active
 
+- [Generated-code capability experiments](jit-capability-experiments.md)
+
 - [Survivor aging and literal string pretenuring](gc-survivors-and-strings.md)
 
 - [GC policy audit against V8](gc-policy-audit.md)

@@ -430,6 +430,8 @@ void jit_emit_properties(jit_compile_t *c) {
     }
 
     case OP_GET_ELEM: {
+      unsigned array_origin = c->vs.parameter_origin[c->vs.sp - 2];
+      jit_array_guard_fact_t *array_fact = array_origin ? &c->array_guards[array_origin - 1] : NULL;
       uint8_t feedback = sv_func_type_feedback(c->func)
                              ? sv_func_type_feedback(c->func)[c->bc_off]
                              : 0;
@@ -459,8 +461,8 @@ void jit_emit_properties(jit_compile_t *c) {
             c, key, integer_index, c->vs.d_regs[c->vs.sp], key_is_num,
             bail_direct, index_site);
         MIR_reg_t loaded = c->r_err_tmp;
-        (void)mir_emit_dense_element_guard(
-            c->ctx, c->jit_func, obj, index, loaded, JIT_ELEMENT_NUMERIC_READ, bail_direct, element_site);
+        (void)mir_emit_dense_element_guard_with_fact(
+            c->ctx, c->jit_func, obj, index, loaded, JIT_ELEMENT_NUMERIC_READ, bail_direct, element_site, array_fact);
         mir_i64_to_d(
             c->ctx, c->jit_func, c->vs.d_regs[c->vs.sp - 1], loaded, c->r_d_slot);
         c->vs.slot_type[c->vs.sp - 1] = SLOT_NUM;
@@ -625,6 +627,8 @@ void jit_emit_properties(jit_compile_t *c) {
     }
 
     case OP_PUT_ELEM: {
+      unsigned array_origin = c->vs.parameter_origin[c->vs.sp - 3];
+      jit_array_guard_fact_t *array_fact = array_origin ? &c->array_guards[array_origin - 1] : NULL;
       uint8_t feedback = sv_func_type_feedback(c->func)
                              ? sv_func_type_feedback(c->func)[c->bc_off]
                              : 0;
@@ -664,9 +668,9 @@ void jit_emit_properties(jit_compile_t *c) {
           mir_emit_is_num_guard(c->ctx, c->jit_func, c->r_bool, val, bail_direct);
 
         MIR_reg_t old_value = c->r_err_tmp;
-        MIR_reg_t data = mir_emit_dense_element_guard(
+        MIR_reg_t data = mir_emit_dense_element_guard_with_fact(
             c->ctx, c->jit_func, obj, index, old_value,
-            JIT_ELEMENT_WRITE, bail_direct, element_site);
+            JIT_ELEMENT_WRITE, bail_direct, element_site, array_fact);
         MIR_label_t tagged_old_value = NULL;
         MIR_label_t store = NULL;
         if (tagged_old_possible) {

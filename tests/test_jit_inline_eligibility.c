@@ -1,6 +1,82 @@
 // meson test -C build jit-inline-eligibility
 #include "../src/jit/jit_internal.h"
+#include "silver/feedback.h"
 #include <assert.h>
+
+static void check_call_target_sets(void) {
+  static_assert(sizeof(void *) != 8 || sizeof(sv_call_target_fb_t) == 16, "call feedback entry grew");
+  sv_func_t caller = {0}, callees[5] = {{0}};
+  sv_func_t *targets[4];
+  for (int i = 0; i < 100; i++) sv_tfb_record_call_target(&caller, 10, &callees[i % 3]);
+  assert(caller.call_target_fb_count == 3);
+  assert(sv_tfb_get_call_targets(&caller, 10, targets, 4) == 3);
+  assert(sv_tfb_get_call_target(&caller, 10) == NULL);
+  uint32_t version = caller.tfb_version;
+  for (int i = 0; i < 100; i++) sv_tfb_record_call_target(&caller, 10, &callees[i % 3]);
+  assert(caller.tfb_version == version);
+  sv_tfb_record_call_target(&caller, 10, &callees[3]);
+  assert(sv_tfb_get_call_targets(&caller, 10, targets, 4) == 4);
+  sv_tfb_record_call_target(&caller, 20, &callees[0]);
+  assert(sv_tfb_get_call_target(&caller, 20) == &callees[0]);
+  sv_tfb_record_call_target(&caller, 10, &callees[4]);
+  assert(sv_tfb_get_call_targets(&caller, 10, targets, 4) == 0);
+  assert(sv_tfb_get_call_target(&caller, 20) == &callees[0]);
+  sv_tfb_record_call_target(&caller, 65536 + 20, &callees[1]);
+  assert(sv_tfb_get_call_target(&caller, 20) == &callees[0]);
+  free(caller.call_target_fb);
+}
+
+static void check_stack_shuffle_after_call(void) {
+  uint8_t code[] = {OP_UNDEF, OP_CALL, 0, 0, OP_UNDEF, OP_INSERT2, OP_POP, OP_POP, OP_RETURN_UNDEF};
+  sv_func_t callee = {.code = code, .code_len = sizeof(code), .max_stack = 3};
+  assert(jit_inlineable(&callee));
+}
+
+static void check_field_loop_eligibility(void) {
+  uint8_t code[] = {OP_THIS, OP_PUT_LOCAL8, 0,
+    OP_GET_LOCAL8, 0, OP_GET_FIELD, 0, 0, 0, 0, 0, 0,
+    OP_SET_LOCAL8, 0, OP_NULL, OP_NE, OP_JMP_TRUE8, 0xf1,
+    OP_RETURN_UNDEF};
+  sv_func_t func = {.code = code, .code_len = sizeof(code), .max_locals = 1, .max_stack = 2};
+  assert(jit_inlineable(&func));
+  code[14] = OP_TRUE; // General coercive equality must not enter this loop path.
+  assert(!jit_inlineable(&func));
+}
+
+static void check_branch_effects(void) {
+  uint8_t code[] = {OP_TRUE, OP_JMP_FALSE8, 10,
+    OP_UNDEF, OP_CALL, 0, 0, OP_POP, OP_JMP, 6, 0, 0, 0,
+    OP_CONST_I8, 1, OP_CONST_I8, 2, OP_BAND, OP_POP, OP_RETURN_UNDEF};
+  sv_func_t func = {.code = code, .code_len = sizeof(code), .max_stack = 2};
+  assert(jit_inlineable(&func));
+  code[9] = 0; // Now the effectful arm can reach the restarting bitwise guard.
+  assert(!jit_inlineable(&func));
+}
+
+static void check_compiled_field_loop(void) {
+  ant_t *js = ant_create();
+  assert(js);
+  const char *source = "(function(q) { this.link=null; if(q==null)return this;"
+      "var next=q,peek; while((peek=next.link)!=null)next=peek; next.link=this;return q; })";
+  ant_value_t value = js_eval_bytecode_eval(js, source, strlen(source));
+  assert(vtype(value) == kTypeFunction);
+  assert(jit_inlineable(js_func_closure(value)->func));
+  js_destroy(js);
+}
+
+static void check_call_learning_frame(void) {
+  uint8_t code[] = {OP_GET_ARG, 0, 0, OP_GET_ARG, 1, 0, OP_CALL_METHOD, 0, 0, OP_RETURN};
+  uint8_t target_code[] = {OP_RETURN_UNDEF};
+  sv_func_t caller = {.code = code, .code_len = sizeof(code), .param_count = 2};
+  sv_func_t target = {.code = target_code, .code_len = sizeof(target_code)};
+  jit_features_t features = jit_prescan_features(&caller, 0);
+  assert(!features.needs_bailout);
+  sv_tfb_record_call_target(&caller, 6, &target);
+  features = jit_prescan_features(&caller, 0);
+  assert(features.needs_bailout && features.needs_args_buf);
+  free(caller.call_target_fb);
+}
+
 
 static bool can_write_parameter(sv_op_t op, uint16_t param_count, uint16_t idx) {
   uint8_t code[] = {OP_UNDEF, (uint8_t)op, (uint8_t)idx, (uint8_t)(idx >> 8), OP_RETURN_UNDEF};
@@ -171,8 +247,14 @@ static void check_rejected_reuse(bool has_object) {
 }
 
 int main(void) {
+  check_call_target_sets();
+  check_stack_shuffle_after_call();
+  check_field_loop_eligibility();
+  check_branch_effects();
+  check_compiled_field_loop();
+  check_call_learning_frame();
   check_branch_boundaries();
-  puts("PASS inline branches require complete, forward instruction targets");
+  puts("PASS inline branches require complete instruction targets and safe loop bodies");
   check_stack_effects();
   puts("PASS shared stack effects include variadic operands and map descriptors");
   const sv_op_t writes[] = {OP_PUT_ARG, OP_SET_ARG};

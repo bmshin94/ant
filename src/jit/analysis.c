@@ -161,6 +161,14 @@ jit_features_t jit_prescan_features(sv_func_t *func, int n_slots) {
     }
     uint16_t flags = sv_op_flags[op];
     if ((flags & SV_OPF_JIT_NEEDS_BAILOUT) != 0) f.needs_bailout = true;
+    if (op == OP_CALL_METHOD || op == OP_TAIL_CALL_METHOD) {
+      sv_func_t *targets[SV_CALL_FB_MAX_TARGETS];
+      int count = sv_tfb_get_call_targets(func, (int)(ip - func->code), targets, SV_CALL_FB_MAX_TARGETS);
+      for (int i = 0; i < count; i++) if (jit_inlineable(targets[i])) {
+        f.needs_bailout = true; // A newly observed target resumes at this CALL.
+        break;
+      }
+    }
     if ((flags & SV_OPF_JIT_NEEDS_INC_LOCAL) != 0) f.needs_inc_local = true;
     if ((flags & SV_OPF_JIT_NEEDS_ARGS_BUF) != 0) f.needs_args_buf = true;
     if ((flags & SV_OPF_JIT_NEEDS_TCO_ARGS) != 0) f.needs_tco_args = true;

@@ -183,8 +183,9 @@ bool jit_setup_frame(jit_compile_t *c) {
   c->vs.has_const = calloc((size_t)c->vs.max, sizeof(bool));
   c->vs.known_bool = calloc((size_t)c->vs.max, sizeof(uint8_t));
   c->vs.integer_range = calloc((size_t)c->vs.max, sizeof(jit_integer_range_t));
+  c->vs.parameter_origin = calloc((size_t)c->vs.max, 1);
 
-  if (!c->vs.regs || !c->vs.known_func || !c->vs.d_regs || !c->vs.slot_type || !c->vs.known_const || !c->vs.has_const || !c->vs.known_bool || !c->vs.integer_range) {
+  if (!c->vs.regs || !c->vs.known_func || !c->vs.d_regs || !c->vs.slot_type || !c->vs.known_const || !c->vs.has_const || !c->vs.known_bool || !c->vs.integer_range || !c->vs.parameter_origin) {
     free(c->vs.regs);
     free(c->vs.known_func);
     free(c->vs.d_regs);
@@ -193,6 +194,7 @@ bool jit_setup_frame(jit_compile_t *c) {
     free(c->vs.has_const);
     free(c->vs.known_bool);
     free(c->vs.integer_range);
+    free(c->vs.parameter_origin);
 
     jit_discard_setup_module(c);
 
@@ -231,6 +233,7 @@ bool jit_setup_frame(jit_compile_t *c) {
       free(c->vs.has_const);
       free(c->vs.known_bool);
       free(c->vs.integer_range);
+      free(c->vs.parameter_origin);
       free(c->local_regs);
       free(c->local_d_regs);
       free(c->known_func_locals);
