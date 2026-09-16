@@ -177,9 +177,7 @@ export function summarizeEngineSamples(samples) {
   const successful = samples.filter(sample => sample.status === 'ok');
   const results = {};
   for (const [name] of benchmarkFiles) {
-    results[name] = summarize(
-      successful.map(sample => sample.results[name]).filter(value => Number.isFinite(value))
-    );
+    results[name] = summarize(successful.map(sample => sample.results[name]).filter(value => Number.isFinite(value)));
   }
   return {
     sampleCount: successful.length,
@@ -194,9 +192,10 @@ export async function repositoryMetadata(repo) {
   const branch = process.env.GITHUB_REF_NAME || (await git(['branch', '--show-current'])) || 'detached';
   const status = await git(['status', '--porcelain', '--untracked-files=no']);
   return {
-    url: process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY
-      ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}`
-      : 'https://github.com/theMackabu/ant',
+    url:
+      process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY
+        ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}`
+        : 'https://github.com/theMackabu/ant',
     branch,
     revision,
     dirty: status.length > 0
@@ -219,12 +218,17 @@ export async function buildMetadata(repo, engineRoot = path.join(repo, '.cache',
   if (fs.existsSync(manifestPath)) {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     if (
-      typeof manifest.type === 'string'
-      && typeof manifest.compiler === 'string'
-      && typeof manifest.tuning === 'string'
-      && (manifest.pgoProfileSha256 === null || /^[0-9a-f]{64}$/u.test(manifest.pgoProfileSha256))
+      typeof manifest.type === 'string' &&
+      typeof manifest.compiler === 'string' &&
+      typeof manifest.tuning === 'string' &&
+      (manifest.pgoProfileSha256 === null || /^[0-9a-f]{64}$/u.test(manifest.pgoProfileSha256))
     ) {
-      return manifest;
+      return {
+        type: manifest.type,
+        compiler: manifest.compiler,
+        tuning: manifest.tuning,
+        pgoProfileSha256: manifest.pgoProfileSha256
+      };
     }
     throw new Error(`invalid benchmark build manifest: ${manifestPath}`);
   }
@@ -234,18 +238,14 @@ export async function buildMetadata(repo, engineRoot = path.join(repo, '.cache',
   try {
     const result = await execFile(compiler, ['--version'], { encoding: 'utf8', timeout: 30_000 });
     compilerVersion = result.stdout.trim().split(/\r?\n/u)[0] || compilerVersion;
-  } catch {
-    // The binary identity and result remain useful if a compiler was not on PATH.
-  }
+  } catch {}
 
   const profilePath = path.join(repo, 'meson', 'pgo', 'profiles', 'ant-darwin-aarch64.profdata');
   return {
     type: process.env.ANT_BENCH_BUILD_TYPE || 'nix-develop-release-pgo-lto',
     compiler: compilerVersion,
     tuning: process.env.ANT_BENCH_TUNING || 'native-arm64',
-    pgoProfileSha256: fs.existsSync(profilePath)
-      ? crypto.createHash('sha256').update(fs.readFileSync(profilePath)).digest('hex')
-      : null
+    pgoProfileSha256: fs.existsSync(profilePath) ? crypto.createHash('sha256').update(fs.readFileSync(profilePath)).digest('hex') : null
   };
 }
 
@@ -262,9 +262,7 @@ export function scheduledDate(now = new Date()) {
 
 export function runExecutionId(now = new Date(), environment = process.env) {
   if (/^\d+$/u.test(environment.GITHUB_RUN_ID || '')) {
-    const attempt = /^\d+$/u.test(environment.GITHUB_RUN_ATTEMPT || '')
-      ? environment.GITHUB_RUN_ATTEMPT
-      : '1';
+    const attempt = /^\d+$/u.test(environment.GITHUB_RUN_ATTEMPT || '') ? environment.GITHUB_RUN_ATTEMPT : '1';
     return `gh-${environment.GITHUB_RUN_ID}-${attempt}`;
   }
   return `local-${now.toISOString().replace(/\D/gu, '')}`;

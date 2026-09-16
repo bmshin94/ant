@@ -128,7 +128,7 @@ test('run identity and Pacific scheduled date are deterministic', () => {
   assert.equal(scheduledDate(new Date('2026-08-29T07:29:00Z')), '2026-08-29');
 });
 
-test('build metadata prefers the build-step manifest', async () => {
+test('build metadata publishes only API fields from the build-step manifest', async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'ant-build-metadata-'));
   const engineRoot = path.join(repo, 'engine-root');
   const expected = {
@@ -141,7 +141,11 @@ test('build metadata prefers the build-step manifest', async () => {
     fs.mkdirSync(path.join(engineRoot, 'ant-bench-build'), { recursive: true });
     fs.writeFileSync(
       path.join(engineRoot, 'ant-bench-build', 'arm64-bench-build.json'),
-      JSON.stringify(expected)
+      JSON.stringify({
+        ...expected,
+        dependencyInputsSha256: 'd'.repeat(64),
+        cacheOnlyMetadata: true
+      })
     );
     assert.deepEqual(await buildMetadata(repo, engineRoot), expected);
   } finally {
