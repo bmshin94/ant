@@ -41,12 +41,18 @@ profile_path="$REPO_ROOT/meson/pgo/profiles/ant-darwin-aarch64.profdata"
 profile_sha=$(shasum -a 256 "$profile_path" | awk '{print $1}')
 manifest_path="$BUILD_DIR/arm64-bench-build.json"
 previous_profile_sha=$(jq -r '.pgoProfileSha256 // empty' "$manifest_path" 2>/dev/null || true)
-meson subprojects download >/dev/null 2>&1 || true
+previous_dependency_sha=$(jq -r '.dependencyInputsSha256 // empty' "$manifest_path" 2>/dev/null || true)
+source "$SCRIPT_DIR/sync-dependencies.sh"
+sync_bench_dependencies
 
 build_timestamp=${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct HEAD)}
 meson_setup=(setup "$BUILD_DIR")
 if [[ -f "$BUILD_DIR/meson-private/coredata.dat" ]]; then
-  meson_setup+=(--reconfigure)
+  if [[ "$previous_dependency_sha" != "$dependency_sha" ]]; then
+    meson_setup+=(--wipe)
+  else
+    meson_setup+=(--reconfigure)
+  fi
 fi
 meson "${meson_setup[@]}" \
   --buildtype=release \
@@ -72,7 +78,8 @@ jq -n \
   --arg compiler "$compiler_version" \
   --arg tuning native-arm64 \
   --arg pgoProfileSha256 "$profile_sha" \
-  '{type: $type, compiler: $compiler, tuning: $tuning, pgoProfileSha256: $pgoProfileSha256}' \
+  --arg dependencyInputsSha256 "$dependency_sha" \
+  '{type: $type, compiler: $compiler, tuning: $tuning, pgoProfileSha256: $pgoProfileSha256, dependencyInputsSha256: $dependencyInputsSha256}' \
   > "$manifest_path"
 
 ccache --show-stats

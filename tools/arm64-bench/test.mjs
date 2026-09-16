@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   buildMetadata,
   geometricMean,
@@ -17,6 +19,58 @@ import {
   summarize,
   summarizeEngineSamples
 } from './lib.mjs';
+
+test('dependency cache refreshes changed inputs and retries failed downloads', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'ant-dependency-cache-'));
+  const helper = fileURLToPath(new URL('./sync-dependencies.sh', import.meta.url));
+  const write = (name, content = '') => {
+    const target = path.join(repo, name);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content);
+  };
+  const exists = name => fs.existsSync(path.join(repo, name));
+  const sync = (fail = false) => spawnSync('bash', ['-c', `
+    set -euo pipefail
+    source "$1"
+    meson() { [[ "$FAIL_DOWNLOAD" != 1 ]]; }
+    sync_bench_dependencies
+  `, 'test', helper], { cwd: repo, env: { ...process.env, FAIL_DOWNLOAD: fail ? '1' : '0' } });
+  try {
+    execFileSync('git', ['init', '-q', repo]);
+    write('vendor/tlsuv.wrap', 'revision = v1');
+    write('vendor/packagefiles/patches/frame.patch', 'old patch');
+    execFileSync('git', ['add', 'vendor'], { cwd: repo });
+    write('vendor/tlsuv/stale.h');
+    execFileSync('git', ['init', '-q', 'vendor/tlsuv'], { cwd: repo });
+    write('vendor/packagecache/archive.tar');
+    write('vendor/packagefiles/local.patch');
+    assert.equal(sync().status, 0);
+    assert.equal(exists('vendor/tlsuv'), false);
+    assert.equal(exists('vendor/packagecache/archive.tar'), true);
+    assert.equal(exists('vendor/packagefiles/local.patch'), true);
+    assert.equal(exists('vendor/tlsuv.wrap'), true);
+    write('vendor/tlsuv/current.h');
+    assert.equal(sync().status, 0);
+    assert.equal(exists('vendor/tlsuv/current.h'), true);
+    write('vendor/packagefiles/patches/frame.patch', 'new patch');
+    assert.equal(sync(true).status, 1);
+    assert.equal(exists('vendor/.arm64-bench-inputs.sha256'), false);
+    write('vendor/tlsuv/partial.h');
+    assert.equal(sync().status, 0);
+    assert.equal(exists('vendor/tlsuv'), false);
+    write('vendor/tlsuv/current.h');
+    write('vendor/tlsuv.wrap', 'revision = v2');
+    assert.equal(sync().status, 0);
+    assert.equal(exists('vendor/tlsuv'), false);
+    write('vendor/tlsuv/current.h');
+    fs.unlinkSync(path.join(repo, 'vendor/packagefiles/patches/frame.patch'));
+    execFileSync('git', ['add', '-u'], { cwd: repo });
+    assert.equal(sync().status, 0);
+    assert.equal(exists('vendor/tlsuv'), false);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
 
 test('median and dispersion summaries preserve raw scale', () => {
   assert.equal(median([9, 1, 5]), 5);
