@@ -360,6 +360,8 @@ struct ant_isolate_t {
 
   struct {
     ant_pool_t young;
+    // Sealed first-survival blocks; fresh ropes allocate only in young.
+    ant_pool_t survivor;
     ant_pool_t old;
 
     size_t young_alloc;

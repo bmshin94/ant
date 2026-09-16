@@ -23,7 +23,7 @@ static inline ant_value_t sv_op_add_bigints(
   return res;
 }
 
-static inline ant_value_t sv_op_add(sv_vm_t *vm, ant_t *js) {
+static inline ant_value_t sv_op_add_at_site(sv_vm_t *vm, ant_t *js, gc_alloc_site_t *site) {
   ant_value_t r = vm->stack[--vm->sp];
   ant_value_t l = vm->stack[--vm->sp];
   
@@ -52,7 +52,7 @@ static inline ant_value_t sv_op_add(sv_vm_t *vm, ant_t *js) {
     if (is_err(l_str)) return l_str;
     ant_value_t r_str = coerce_to_str_concat(js, ru);
     if (is_err(r_str)) return r_str;
-    ant_value_t res = do_string_op(js, TOK_PLUS, l_str, r_str);
+    ant_value_t res = js_string_concat(js, l_str, r_str, site && site->pretenured);
     vm->stack[vm->sp++] = res;
     return res;
   }
@@ -62,6 +62,10 @@ static inline ant_value_t sv_op_add(sv_vm_t *vm, ant_t *js) {
   
   vm->stack[vm->sp++] = tov(js_to_number(js, lu) + js_to_number(js, ru));
   return tov(0);
+}
+
+static inline ant_value_t sv_op_add(sv_vm_t *vm, ant_t *js) {
+  return sv_op_add_at_site(vm, js, NULL);
 }
 
 static inline ant_value_t sv_op_sub(sv_vm_t *vm, ant_t *js) {

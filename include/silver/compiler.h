@@ -236,6 +236,7 @@ typedef struct sv_compiler {
 
   struct sv_shaped_site { 
     uint32_t bc_off;
+    uint32_t initializer_end;
     uint32_t first_key;
     uint16_t key_count;
     bool constant_array;

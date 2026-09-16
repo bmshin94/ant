@@ -14,6 +14,7 @@ typedef enum {
 gc_ropes_begin_result_t gc_ropes_begin(ant_t *js, bool minor);
 
 void gc_ropes_sweep(ant_t *js, bool minor);
+bool gc_ropes_have_young_survivors(ant_t *js);
 void gc_ropes_mark_conservative_roots(ant_t *js);
 
 typedef enum {

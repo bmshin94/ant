@@ -424,7 +424,7 @@ static void mir_emit_short_string_concat(
 void mir_emit_string_concat_fastpath(
     MIR_context_t ctx, MIR_item_t fn,
     MIR_reg_t r_js, MIR_reg_t lhs, MIR_reg_t rhs, MIR_reg_t dst,
-    MIR_label_t slow, int owner_id, int bc_off, bool flat_only) {
+    MIR_label_t slow, int owner_id, int bc_off, bool flat_only, gc_alloc_site_t *site) {
   char names[16][48];
   MIR_reg_t regs[16];
   static const char *suffix[16] = {
@@ -439,6 +439,15 @@ void mir_emit_string_concat_fastpath(
   MIR_reg_t ldepth = regs[5], rdepth = regs[6], len = regs[7], depth = regs[8];
   MIR_reg_t head = regs[9], used = regs[10], cap = regs[11], ptr = regs[12];
   MIR_reg_t count = regs[13], next = regs[14], tmp = regs[15];
+
+  MIR_reg_t pool = 0, young = 0;
+  if (site) {
+    char name[48];
+    snprintf(name, sizeof(name), "sc_pool_%d_%d", owner_id, bc_off);
+    pool = MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, name);
+    snprintf(name, sizeof(name), "sc_young_%d_%d", owner_id, bc_off);
+    young = MIR_new_func_reg(ctx, fn->u.func, MIR_T_I64, name);
+  }
 
   mir_emit_string_concat_classify_side(
       ctx, fn, lhs, tag, lp, llen, ldepth, slow);
@@ -478,10 +487,40 @@ void mir_emit_string_concat_fastpath(
                     MIR_new_insn(ctx, MIR_UBGE, MIR_new_label_op(ctx, slow),
                                  MIR_new_reg_op(ctx, count),
                                  MIR_new_uint_op(ctx, GC_ROPE_NURSERY_THRESHOLD)));
+    if (site) {
+      MIR_label_t allocate = MIR_new_label(ctx);
+      mir_load_imm(ctx, fn, young, ANT_ROPE_FLAG_YOUNG);
+      MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, pool),
+          MIR_new_reg_op(ctx, r_js), MIR_new_uint_op(ctx, offsetof(ant_t, rope_gc.young))));
+      mir_load_imm(ctx, fn, tmp, (uintptr_t)&site->pretenured);
+      MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, tmp),
+          MIR_new_mem_op(ctx, MIR_T_U8, 0, tmp, 0, 1)));
+      MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BEQ, MIR_new_label_op(ctx, allocate),
+          MIR_new_reg_op(ctx, tmp), MIR_new_int_op(ctx, 0)));
+      // No old-to-young rope edges: immutable children must already be old.
+      MIR_reg_t depths[] = {ldepth, rdepth}, pointers[] = {lp, rp};
+      for (unsigned i = 0; i < 2; i++) {
+        MIR_label_t flat = MIR_new_label(ctx);
+        MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BEQ, MIR_new_label_op(ctx, flat),
+            MIR_new_reg_op(ctx, depths[i]), MIR_new_int_op(ctx, 0)));
+        MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, tmp),
+            MIR_new_mem_op(ctx, MIR_T_U16, offsetof(ant_rope_heap_t, flags), pointers[i], 0, 1)));
+        MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_AND, MIR_new_reg_op(ctx, tmp),
+            MIR_new_reg_op(ctx, tmp), MIR_new_uint_op(ctx, ANT_ROPE_FLAG_YOUNG)));
+        MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BNE, MIR_new_label_op(ctx, allocate),
+            MIR_new_reg_op(ctx, tmp), MIR_new_int_op(ctx, 0)));
+        MIR_append_insn(ctx, fn, flat);
+      }
+      mir_load_imm(ctx, fn, young, 0);
+      MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, pool),
+          MIR_new_reg_op(ctx, r_js), MIR_new_uint_op(ctx, offsetof(ant_t, rope_gc.old))));
+      MIR_append_insn(ctx, fn, allocate);
+    }
     MIR_append_insn(ctx, fn,
                     MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, head),
                                  MIR_new_mem_op(ctx, MIR_T_P,
-                                                (MIR_disp_t)offsetof(ant_t, rope_gc.young.head), r_js, 0, 1)));
+                                     site ? offsetof(ant_pool_t, head) : offsetof(ant_t, rope_gc.young.head),
+                                     site ? pool : r_js, 0, 1)));
     MIR_append_insn(ctx, fn,
                     MIR_new_insn(ctx, MIR_BEQ, MIR_new_label_op(ctx, slow),
                                  MIR_new_reg_op(ctx, head), MIR_new_int_op(ctx, 0)));
@@ -513,6 +552,9 @@ void mir_emit_string_concat_fastpath(
                                                 (MIR_disp_t)offsetof(ant_pool_block_t, used), head, 0, 1),
                                  MIR_new_reg_op(ctx, next)));
 
+    MIR_label_t charged_young = site ? MIR_new_label(ctx) : NULL;
+    if (site) MIR_append_insn(ctx, fn, MIR_new_insn(ctx, MIR_BEQ,
+        MIR_new_label_op(ctx, charged_young), MIR_new_reg_op(ctx, young), MIR_new_int_op(ctx, 0)));
     MIR_append_insn(ctx, fn,
                     MIR_new_insn(ctx, MIR_ADD, MIR_new_reg_op(ctx, next),
                                  MIR_new_reg_op(ctx, count), MIR_new_uint_op(ctx, sizeof(ant_rope_heap_t))));
@@ -521,6 +563,7 @@ void mir_emit_string_concat_fastpath(
                                  MIR_new_mem_op(ctx, MIR_T_U64,
                                                 (MIR_disp_t)offsetof(ant_t, rope_gc.young_alloc), r_js, 0, 1),
                                  MIR_new_reg_op(ctx, next)));
+    if (site) MIR_append_insn(ctx, fn, charged_young);
     MIR_append_insn(ctx, fn,
                     MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, count),
                                  MIR_new_mem_op(ctx, MIR_T_U64,
@@ -566,7 +609,7 @@ void mir_emit_string_concat_fastpath(
                     MIR_new_insn(ctx, MIR_MOV,
                                  MIR_new_mem_op(ctx, MIR_T_U16,
                                                 (MIR_disp_t)offsetof(ant_rope_heap_t, flags), ptr, 0, 1),
-                                 MIR_new_uint_op(ctx, ANT_ROPE_FLAG_YOUNG)));
+                                 site ? MIR_new_reg_op(ctx, young) : MIR_new_uint_op(ctx, ANT_ROPE_FLAG_YOUNG)));
     MIR_append_insn(ctx, fn,
                     MIR_new_insn(ctx, MIR_MOV,
                                  MIR_new_mem_op(ctx, MIR_T_U32,

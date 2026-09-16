@@ -341,10 +341,10 @@ void *js_type_alloc(ant_t *js, ant_alloc_kind_t kind, size_t size, size_t align)
   return pool_alloc_chain(&pool->head, &pool->free_head, pool->block_size, size, align);
 }
 
-ant_rope_heap_t *js_rope_alloc(ant_t *js) {
+ant_rope_heap_t *js_rope_alloc_generation(ant_t *js, bool old) {
   if (!js) return NULL;
   
-  ant_pool_t *pool = &js->rope_gc.young;
+  ant_pool_t *pool = old ? &js->rope_gc.old : &js->rope_gc.young;
   ant_rope_heap_t *rope = (ant_rope_heap_t *)pool_alloc_chain(
     &pool->head, &pool->free_head, pool->block_size,
     sizeof(ant_rope_heap_t), _Alignof(ant_rope_heap_t)
@@ -353,9 +353,13 @@ ant_rope_heap_t *js_rope_alloc(ant_t *js) {
   if (!rope) return NULL;
 
   js->gc_pool_alloc += sizeof(ant_rope_heap_t);
-  js->rope_gc.young_alloc += sizeof(ant_rope_heap_t);
+  if (!old) js->rope_gc.young_alloc += sizeof(ant_rope_heap_t);
   
   return rope;
+}
+
+ant_rope_heap_t *js_rope_alloc(ant_t *js) {
+  return js_rope_alloc_generation(js, false);
 }
 
 void js_pool_destroy(ant_pool_t *pool) {
@@ -377,6 +381,7 @@ ant_pool_stats_t js_rope_pool_stats(ant_t *js) {
   if (!js) return stats;
   pool_stats_add(&stats, js_pool_stats(&js->pool.rope));
   pool_stats_add(&stats, js_pool_stats(&js->rope_gc.young));
+  pool_stats_add(&stats, js_pool_stats(&js->rope_gc.survivor));
   pool_stats_add(&stats, js_pool_stats(&js->rope_gc.old));
   return stats;
 }

@@ -570,6 +570,7 @@ static void sv_func_init_obj_sites(const sv_compiler_t *c, sv_func_t *func) {
       
       if (i >= count) break;
       if (func->obj_sites[i].bc_off != c->shaped_sites[s].bc_off) continue;
+      func->obj_sites[i].initializer_end = c->shaped_sites[s].initializer_end;
 
       if (c->shaped_sites[s].constant_array) {
         func->obj_sites[i++].array_constant_count = kc;
@@ -4633,6 +4634,7 @@ static void record_shaped_site(sv_compiler_t *c, uint32_t bc_off,
     c->shaped_key_cap = cap;
   }
   c->shaped_sites[c->shaped_site_count].bc_off = bc_off;
+  c->shaped_sites[c->shaped_site_count].initializer_end = 0;
   c->shaped_sites[c->shaped_site_count].first_key = (uint32_t)c->shaped_key_count;
   c->shaped_sites[c->shaped_site_count].key_count = count;
   c->shaped_sites[c->shaped_site_count].constant_array = false;
@@ -4652,7 +4654,9 @@ void compile_object(sv_compiler_t *c, sv_ast_t *node) {
       atom_idx[i] = (uint32_t)add_atom(c, skeys[i], slens[i]);
     uint32_t obj_off = (uint32_t)c->code_len;
     emit_op(c, OP_OBJECT);
+    int site_index = c->shaped_site_count;
     record_shaped_site(c, obj_off, atom_idx, (uint16_t)node->args.count);
+    bool recorded = c->shaped_site_count > site_index;
     for (int i = 0; i < node->args.count; i++) {
       sv_ast_t *prop = node->args.items[i];
       if (prop->left->type == N_IDENT && !is_quoted_ident_key(prop->left))
@@ -4662,6 +4666,7 @@ void compile_object(sv_compiler_t *c, sv_ast_t *node) {
       emit_u32(c, atom_idx[i]);
       emit_u16(c, (uint16_t)i);
     }
+    if (recorded) c->shaped_sites[site_index].initializer_end = (uint32_t)c->code_len;
     return;
   }
 

@@ -401,7 +401,7 @@ void mir_emit_ic_obj_epoch_guard(
 void mir_emit_string_concat_fastpath(
     MIR_context_t ctx, MIR_item_t fn,
     MIR_reg_t r_js, MIR_reg_t lhs, MIR_reg_t rhs, MIR_reg_t dst,
-    MIR_label_t slow, int owner_id, int bc_off, bool flat_only);
+    MIR_label_t slow, int owner_id, int bc_off, bool flat_only, gc_alloc_site_t *site);
 bool mir_emit_put_field_ic_fastpath(
     MIR_context_t ctx, MIR_item_t fn, ant_t *js,
     sv_func_t *func, int bc_off, uint16_t ic_idx, sv_atom_t *atom,

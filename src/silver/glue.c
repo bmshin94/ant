@@ -41,17 +41,21 @@ ant_value_t jit_helper_normalize_sloppy_this(ant_t *js, ant_value_t value) {
   return js_normalize_sloppy_this(js, value);
 }
 
-ant_value_t jit_helper_add(sv_vm_t *vm, ant_t *js, ant_value_t l, ant_value_t r) {
+ant_value_t jit_helper_add_at_site(sv_vm_t *vm, ant_t *js, ant_value_t l, ant_value_t r, gc_alloc_site_t *site) {
   if (vtype(l) == kTypeNumber && vtype(r) == kTypeNumber) return tov(tod(l) + tod(r));
   if (vtype(l) == kTypeString && vtype(r) == kTypeString) {
     GC_ROOT_SAVE(root_mark, js);
     GC_ROOT_PIN(js, l);
     GC_ROOT_PIN(js, r);
-    ant_value_t res = do_string_op(js, TOK_PLUS, l, r);
+    ant_value_t res = js_string_concat(js, l, r, site && site->pretenured);
     GC_ROOT_RESTORE(js, root_mark);
     return is_err(res) ? SV_JIT_BAILOUT : res;
   }
   return SV_JIT_BAILOUT;
+}
+
+ant_value_t jit_helper_add(sv_vm_t *vm, ant_t *js, ant_value_t l, ant_value_t r) {
+  return jit_helper_add_at_site(vm, js, l, r, NULL);
 }
 
 ant_value_t jit_helper_sub(sv_vm_t *vm, ant_t *js, ant_value_t l, ant_value_t r) {

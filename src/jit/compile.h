@@ -83,6 +83,8 @@ typedef struct jit_compile {
   MIR_item_t destructure_close_proto;
   MIR_item_t destructure_next_proto;
   MIR_item_t imp_add;
+  MIR_item_t imp_add_at_site;
+  MIR_item_t concat_site_proto;
   MIR_item_t imp_sub;
   MIR_item_t imp_mul;
   MIR_item_t imp_div;

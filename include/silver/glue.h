@@ -10,6 +10,7 @@ void jit_helper_shape_transition(ant_object_t *obj, ant_shape_t *to_shape);
 ant_value_t jit_helper_normalize_sloppy_this(ant_t *js, ant_value_t value);
 
 ant_value_t jit_helper_add(sv_vm_t *vm, ant_t *js, ant_value_t l, ant_value_t r);
+ant_value_t jit_helper_add_at_site(sv_vm_t *vm, ant_t *js, ant_value_t l, ant_value_t r, gc_alloc_site_t *site);
 ant_value_t jit_helper_sub(sv_vm_t *vm, ant_t *js, ant_value_t l, ant_value_t r);
 ant_value_t jit_helper_mul(sv_vm_t *vm, ant_t *js, ant_value_t l, ant_value_t r);
 ant_value_t jit_helper_div(sv_vm_t *vm, ant_t *js, ant_value_t l, ant_value_t r);

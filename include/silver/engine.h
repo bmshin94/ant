@@ -232,6 +232,9 @@ void sv_ic_shape_refs_cleanup(ant_t *js);
 
 typedef struct {
   uint32_t bc_off;
+  // End of a shaped object's initializer (exclusive); zero for array sites.
+  // Concatenations in this lexical range can inherit its tenuring decision.
+  uint32_t initializer_end;
   ant_shape_t *shared_shape;
   const uint32_t *key_atoms;
   uint16_t key_count;
@@ -490,6 +493,16 @@ static inline sv_obj_site_cache_t *sv_obj_site_for_offset(
   return &func->obj_sites[lo];
 }
 
+static inline gc_alloc_site_t *sv_concat_allocation_site(sv_func_t *func, uint32_t off) {
+  if (!func || !func->obj_sites) return NULL;
+  // Innermost enclosing initializer wins. Calls use their own function's sites.
+  for (uint32_t i = func->obj_site_count; i-- > 0;) {
+    sv_obj_site_cache_t *site = &func->obj_sites[i];
+    if (site->bc_off < off && off < site->initializer_end) return &site->allocation;
+  }
+  return NULL;
+}
+
 static inline sv_func_metadata_t *sv_func_metadata(sv_func_t *func) {
   if (!func || !func->has_dynamic_eval) return NULL;
   ANT_ASSERT(
@@ -585,6 +598,8 @@ struct sv_upvalue {
   struct sv_upvalue *next;
   uint64_t gc_epoch;
   uint8_t in_remember_set;
+  uint8_t generation;
+  uint8_t age;
 };
 
 typedef struct sv_activation {
@@ -608,14 +623,14 @@ void sv_activation_seal(ant_t *js, sv_activation_t *act);
 void sv_activation_discard(sv_vm_t *vm, int entry_fp);
 
 static inline void gc_upvalue_write_barrier(ant_t *js, sv_upvalue_t *uv, ant_value_t new_val) {
-  if (uv->in_remember_set || uv->gc_epoch == 0) return;
+  if (uv->in_remember_set || !uv->generation) return;
   if (!is_tagged(new_val) || !gc_value_is_heap_ref(new_val)) return;
   if (uv->location == &uv->closed || gc_value_ref_is_young(new_val))
     gc_remember_upvalue(js, uv);
 }
 
 static inline void gc_upvalue_capture_barrier(ant_t *js, sv_upvalue_t *uv) {
-  if (uv->in_remember_set || uv->gc_epoch == 0) return;
+  if (uv->in_remember_set || !uv->generation) return;
   ant_value_t value = *uv->location;
   if (gc_value_is_heap_ref(value) && gc_value_ref_is_young(value))
     gc_remember_upvalue(js, uv);
@@ -673,6 +688,7 @@ typedef struct sv_closure {
   
   uint8_t in_remember_set;
   uint8_t generation;
+  uint8_t age;
   uint64_t gc_epoch;
 } sv_closure_t;
 
@@ -698,6 +714,7 @@ static inline sv_closure_t *js_closure_alloc_finish(
   c->u.pending.len = 0;
   c->in_remember_set = 0;
   c->generation = 0;
+  c->age = 0;
   
   if (js->young_closure_len < js->young_closure_cap)
     js->young_closures[js->young_closure_len++] = c;

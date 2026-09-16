@@ -11,6 +11,7 @@
 #include "gc.h"
 #include "gc/bigints.h"
 #include "gc/objects.h"
+#include "gc/ropes.h"
 #include "gc/roots.h"
 #include "gc/weak.h"
 #include "gc/modules.h"
@@ -264,8 +265,8 @@ void gc_allocation_feedback_cleanup(ant_t *js) {
   js->gc_allocation_samples_len = js->gc_allocation_samples_cap = 0;
 }
 
-void gc_remember_upvalue(ant_t *js, struct sv_upvalue *uv) {
-  if (!js || !uv || js->gc_objects_running || uv->in_remember_set) return;
+static void gc_remember_promoted_upvalue(ant_t *js, struct sv_upvalue *uv) {
+  if (uv->in_remember_set) return;
 
   if (js->remembered_upvalue_len >= js->remembered_upvalue_cap) {
     size_t new_cap = js->remembered_upvalue_cap ? js->remembered_upvalue_cap * 2 : 64;
@@ -277,6 +278,11 @@ void gc_remember_upvalue(ant_t *js, struct sv_upvalue *uv) {
 
   uv->in_remember_set = 1;
   js->remembered_upvalues[js->remembered_upvalue_len++] = uv;
+}
+
+void gc_remember_upvalue(ant_t *js, struct sv_upvalue *uv) {
+  if (!js || !uv || js->gc_objects_running) return;
+  gc_remember_promoted_upvalue(js, uv);
 }
 
 static void gc_mark_remembered_upvalues(ant_t *js) {
@@ -359,11 +365,19 @@ static inline void gc_release_closure_payload(sv_closure_t *c) {
 
 static void gc_sweep_young_closures(ant_t *js) {
   ant_fixed_arena_t *ca = &js->closure_arena;
+  size_t retained = 0;
   for (size_t i = 0; i < js->young_closure_len; i++) {
     sv_closure_t *c = js->young_closures[i];
     if (c->gc_epoch == gc_epoch) {
+      if (g_minor_delay_promotion && !c->generation && !c->age) {
+        c->age = 1;
+        js->young_closures[retained++] = c;
+        continue;
+      }
       c->generation = 1;
       js->gc_closure_promoted_since_major++;
+      // Captured cells and object fields can be younger than the closure.
+      if (g_minor_delay_promotion) gc_remember_closure(js, c);
       continue;
     }
     
@@ -371,10 +385,10 @@ static void gc_sweep_young_closures(ant_t *js) {
     fixed_arena_free_elem(ca, c);
   }
   
-  js->young_closure_len = 0;
-  js->young_closure_trigger = GC_CLOSURE_NURSERY_THRESHOLD;
+  js->young_closure_len = retained;
+  js->young_closure_trigger = retained + GC_CLOSURE_NURSERY_THRESHOLD;
 
-  js->young_closures = shrink_ptr_roster(
+  if (!retained) js->young_closures = shrink_ptr_roster(
     js->young_closures, &js->young_closure_cap,
     GC_YOUNG_ROSTER_RETAIN_CAP
   );
@@ -382,14 +396,26 @@ static void gc_sweep_young_closures(ant_t *js) {
 
 static void gc_sweep_young_upvalues(ant_t *js) {
   ant_fixed_arena_t *ua = &js->upvalue_arena;
+  size_t retained = 0;
   for (size_t i = 0; i < js->young_upvalue_len; i++) {
     struct sv_upvalue *uv = js->young_upvalues[i];
-    if (uv->gc_epoch == gc_epoch) continue;
+    if (uv->gc_epoch == gc_epoch) {
+      if (g_minor_delay_promotion && !uv->generation && !uv->age) {
+        uv->age = 1;
+        js->young_upvalues[retained++] = uv;
+      } else {
+        uv->generation = 1;
+        if (g_minor_delay_promotion && gc_value_is_heap_ref(*uv->location) &&
+            gc_value_ref_is_young(*uv->location))
+          gc_remember_promoted_upvalue(js, uv);
+      }
+      continue;
+    }
     fixed_arena_free_elem(ua, uv);
   }
-  js->young_upvalue_len = 0;
+  js->young_upvalue_len = retained;
 
-  js->young_upvalues = shrink_ptr_roster(
+  if (!retained) js->young_upvalues = shrink_ptr_roster(
     js->young_upvalues, &js->young_upvalue_cap,
     GC_YOUNG_ROSTER_RETAIN_CAP
   );
@@ -716,7 +742,7 @@ static bool gc_weak_key_alive(ant_t *js, ant_value_t key) {
 
 bool gc_upvalue_is_live(ant_t *js, const sv_upvalue_t *uv) {
   if (!js->gc_running) return true;
-  return g_minor_gc ? uv->gc_epoch != 0 : uv->gc_epoch == gc_epoch;
+  return (g_minor_gc && uv->generation) || uv->gc_epoch == gc_epoch;
 }
 
 static bool gc_weak_collection_live(const ant_object_t *obj) {
@@ -1290,6 +1316,7 @@ void gc_pin_existing_objects(ant_t *js) {
   for (size_t off = 0; off < ua->watermark; off += ua->elem_size) {
     sv_upvalue_t *uv = (sv_upvalue_t *)(ua->base + off);
     if (uv->gc_epoch == 0) uv->gc_epoch = stamp;
+    uv->generation = 1;
   }
 
   ant_object_t *tail = NULL;
@@ -1401,7 +1428,10 @@ void gc_objects_run(
     uint8_t *slot = ua->base + off;
     uint64_t epoch;
     memcpy(&epoch, slot + ua->epoch_offset, sizeof(epoch));
-    if (epoch == gc_epoch) ua->live_count++;
+    if (epoch == gc_epoch) {
+      ((sv_upvalue_t *)slot)->generation = 1;
+      ua->live_count++;
+    }
     else {
       *(void **)slot = ua->free_list;
       ua->free_list = slot;
@@ -1494,9 +1524,10 @@ void gc_objects_run_minor(ant_t *js, gc_str_mark_fn str_mark) {
 
   gc_sweep_young_closures(js);
   gc_sweep_young_upvalues(js);
-  if (js->objects) {
+  if (js->objects || js->young_closure_len || js->young_upvalue_len ||
+      gc_ropes_have_young_survivors(js)) {
     gc_prune_remembered_objects(js);
-    // Non-object owners may still refer to first-survival young objects.
+    // Non-object owners may still refer to first-survival young heap values.
   } else {
     js->gc_opaque_remembered_objects = 0;
     for (size_t i = 0; i < js->remember_set_len; i++)

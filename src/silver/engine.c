@@ -1567,7 +1567,7 @@ ant_value_t sv_execute_frame(sv_vm_t *vm, sv_func_t *func, ant_value_t this, ant
     if (__builtin_expect(vtype(l) == kTypeNumber && vtype(r) == kTypeNumber, 1)) {
       vm->sp--; vm->stack[vm->sp - 1] = tov(tod(l) + tod(r)); NEXT(1);
     }
-    VM_CHECK(sv_op_add(vm, js)); NEXT(1);
+    VM_CHECK(sv_op_add_at_site(vm, js, sv_concat_allocation_site(func, (uint32_t)(ip - func->code)))); NEXT(1);
   }
 
   L_ADD_NUM: {

@@ -117,6 +117,7 @@ static size_t gc_scaled_threshold(size_t base_live, uint32_t growth_x256, size_t
 static size_t gc_pool_live_bytes(ant_t *js) {
   ant_pool_stats_t rope_stats = js_pool_stats(&js->pool.rope);
   ant_pool_stats_t rope_young_stats = js_pool_stats(&js->rope_gc.young);
+  ant_pool_stats_t rope_survivor_stats = js_pool_stats(&js->rope_gc.survivor);
   ant_pool_stats_t rope_old_stats = js_pool_stats(&js->rope_gc.old);
   ant_pool_stats_t symbol_stats = js_pool_stats(&js->pool.symbol);
   ant_pool_stats_t bigint_stats = js_class_pool_stats(&js->pool.bigint);
@@ -124,6 +125,7 @@ static size_t gc_pool_live_bytes(ant_t *js) {
 
   return rope_stats.used
     + rope_young_stats.used
+    + rope_survivor_stats.used
     + rope_old_stats.used
     + symbol_stats.used
     + bigint_stats.used
@@ -366,8 +368,8 @@ void gc_run_minor(ant_t *js) {
   for (size_t i = 0; i < js->rope_gc.remembered_builder_len; i++)
     gc_mark_str(js, ant_mkbuilder_value(js->rope_gc.remembered_builders[i]));
   gc_objects_run_minor(js, gc_mark_str);
-  gc_clear_remembered_builders(js);
   gc_ropes_sweep(js, true);
+  if (!js->rope_gc.survivor.head) gc_clear_remembered_builders(js);
 
   ant_ic_obj_epoch_bump();
 

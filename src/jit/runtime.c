@@ -38,6 +38,7 @@ void jit_load_externals_once(sv_jit_ctx_t *jc) {
     MIR_load_external(jc->ctx_hot, #name, name); \
   } while (0)
   LOAD_EXT(jit_helper_add);
+  LOAD_EXT(jit_helper_add_at_site);
   LOAD_EXT(jit_helper_sub);
   LOAD_EXT(jit_helper_mul);
   LOAD_EXT(jit_helper_div);

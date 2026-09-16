@@ -21,6 +21,9 @@ void jit_setup_prototypes(jit_compile_t *c, MIR_type_t ret_type) {
                                    MIR_JSVAL, "r");
 
   MIR_type_t private_put_ret = MIR_JSVAL;
+  c->concat_site_proto = MIR_new_proto(c->ctx, "concat_site_proto",
+      1, &h2_ret, 5, MIR_T_I64, "vm", MIR_T_I64, "js",
+      MIR_JSVAL, "l", MIR_JSVAL, "r", MIR_T_P, "site");
   c->private_put_proto = MIR_new_proto(c->ctx, "private_put_proto",
                                        1, &private_put_ret,
                                        5,
@@ -582,6 +585,7 @@ void jit_setup_prototypes(jit_compile_t *c, MIR_type_t ret_type) {
                                             MIR_T_P, "iter_buf");
 
   c->imp_add = MIR_new_import(c->ctx, "jit_helper_add");
+  c->imp_add_at_site = MIR_new_import(c->ctx, "jit_helper_add_at_site");
   c->imp_sub = MIR_new_import(c->ctx, "jit_helper_sub");
   c->imp_mul = MIR_new_import(c->ctx, "jit_helper_mul");
   c->imp_div = MIR_new_import(c->ctx, "jit_helper_div");

@@ -397,6 +397,8 @@ static inline bool sv_op_call_call_fused(
       cell.next = NULL;
       cell.gc_epoch = 0;
       cell.in_remember_set = 1;
+      cell.generation = 0;
+      cell.age = 0;
 
       sv_closure_t fake = {
         .call_flags = 0,

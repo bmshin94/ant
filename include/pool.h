@@ -161,6 +161,7 @@ void js_class_pool_destroy(ant_class_pool_t *pool);
 void js_string_pool_destroy(ant_string_pool_t *pool);
 
 ant_rope_heap_t *js_rope_alloc(ant_t *js);
+ant_rope_heap_t *js_rope_alloc_generation(ant_t *js, bool old);
 ant_pool_stats_t js_pool_stats(ant_pool_t *pool);
 ant_pool_stats_t js_rope_pool_stats(ant_t *js);
 ant_pool_stats_t js_class_pool_stats(ant_class_pool_t *pool);

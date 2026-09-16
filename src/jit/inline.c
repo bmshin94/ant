@@ -992,7 +992,8 @@ void jit_emit_inline_body(
           MIR_reg_t rd = inl_vs[isp++];
           inl_num[isp - 1] = 0;
           mir_emit_string_concat_fastpath(
-              ctx, jit_func, r_js, rl, rr, rd, slow, id, str_bc_off, false);
+              ctx, jit_func, r_js, rl, rr, rd, slow, id, str_bc_off, false,
+              sv_concat_allocation_site(callee, (uint32_t)str_bc_off));
           break;
         }
 

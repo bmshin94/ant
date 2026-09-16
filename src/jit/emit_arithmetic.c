@@ -62,7 +62,8 @@ void jit_emit_arithmetic(jit_compile_t *c) {
             &c->vs, c->ctx, c->jit_func, l_is_num, r_is_num, c->r_d_slot);
         MIR_label_t slow = MIR_new_label(c->ctx);
         MIR_label_t done = MIR_new_label(c->ctx);
-        mir_emit_string_concat_fastpath(c->ctx, c->jit_func, c->r_js, rl, rr, rd, slow, -1, c->bc_off, false);
+        gc_alloc_site_t *site = sv_concat_allocation_site(c->func, (uint32_t)c->bc_off);
+        mir_emit_string_concat_fastpath(c->ctx, c->jit_func, c->r_js, rl, rr, rd, slow, -1, c->bc_off, false, site);
         MIR_append_insn(c->ctx, c->jit_func,
                         MIR_new_insn(c->ctx, MIR_JMP, MIR_new_label_op(c->ctx, done)));
         MIR_append_insn(c->ctx, c->jit_func, slow);
@@ -70,7 +71,14 @@ void jit_emit_arithmetic(jit_compile_t *c) {
                         MIR_new_insn(c->ctx, MIR_MOV,
                                      MIR_new_reg_op(c->ctx, c->r_bailout_val),
                                      MIR_new_reg_op(c->ctx, rl)));
-        mir_call_helper2(c->ctx, c->jit_func, rd,
+        if (site) MIR_append_insn(c->ctx, c->jit_func,
+            MIR_new_call_insn(c->ctx, 8,
+                MIR_new_ref_op(c->ctx, c->concat_site_proto),
+                MIR_new_ref_op(c->ctx, c->imp_add_at_site),
+                MIR_new_reg_op(c->ctx, rd), MIR_new_reg_op(c->ctx, c->r_vm),
+                MIR_new_reg_op(c->ctx, c->r_js), MIR_new_reg_op(c->ctx, rl),
+                MIR_new_reg_op(c->ctx, rr), MIR_new_uint_op(c->ctx, (uintptr_t)site)));
+        else mir_call_helper2(c->ctx, c->jit_func, rd,
                          c->helper2_proto, c->imp_add,
                          c->r_vm, c->r_js, rl, rr);
         mir_emit_bailout_check_typed(c->ctx, c->jit_func, rd,

@@ -11,6 +11,7 @@ typedef enum {
   GC_ROPE_POOL_MISC,
   GC_ROPE_POOL_OLD,
   GC_ROPE_POOL_YOUNG,
+  GC_ROPE_POOL_SURVIVOR,
 } gc_rope_pool_kind_t;
 
 typedef struct gc_rope_mark {
@@ -98,6 +99,7 @@ gc_ropes_begin_result_t gc_ropes_begin(ant_t *js, bool minor) {
   size_t needed = 0;
   if (!rope_marks_count_pool(&js->pool.rope, &needed) ||
       !rope_marks_count_pool(&js->rope_gc.old, &needed) ||
+      !rope_marks_count_pool(&js->rope_gc.survivor, &needed) ||
       !rope_marks_count_pool(&js->rope_gc.young, &needed) ||
       !rope_marks_reserve(js, needed)) {
     js->rope_gc.mark_count = 0;
@@ -115,11 +117,13 @@ gc_ropes_begin_result_t gc_ropes_begin(ant_t *js, bool minor) {
     js->rope_gc.mark_epoch = 1;
     rope_nodes_clear_epochs(&js->rope_gc.old);
     rope_nodes_clear_epochs(&js->rope_gc.young);
+    rope_nodes_clear_epochs(&js->rope_gc.survivor);
   }
 
   rope_marks_add_pool(js, &js->pool.rope, GC_ROPE_POOL_MISC);
   rope_marks_add_pool(js, &js->rope_gc.old, GC_ROPE_POOL_OLD);
   rope_marks_add_pool(js, &js->rope_gc.young, GC_ROPE_POOL_YOUNG);
+  rope_marks_add_pool(js, &js->rope_gc.survivor, GC_ROPE_POOL_SURVIVOR);
 
   if (js->rope_gc.mark_count > 1)
     qsort(js->rope_gc.marks, js->rope_gc.mark_count,
@@ -137,6 +141,7 @@ void gc_ropes_mark_conservative_roots(ant_t *js) {
   rope_mark_conservative_pool(js, &js->pool.rope);
   rope_mark_conservative_pool(js, &js->rope_gc.old);
   rope_mark_conservative_pool(js, &js->rope_gc.young);
+  rope_mark_conservative_pool(js, &js->rope_gc.survivor);
 }
 
 static gc_rope_mark_t *rope_mark_find(ant_t *js, const void *ptr) {
@@ -236,12 +241,22 @@ static void trim_rope_free_blocks(ant_pool_t *pool, int keep) {
   }
 }
 
+bool gc_ropes_have_young_survivors(ant_t *js) {
+  if (!js->rope_gc.minor_marking || js->gc_policy.minor_surv_ewma >= 128) return false;
+  gc_rope_mark_t *marks = js->rope_gc.marks;
+  for (size_t i = 0; i < js->rope_gc.mark_count; i++)
+    if (marks[i].kind == GC_ROPE_POOL_YOUNG && marks[i].has_live) return true;
+  return false;
+}
+
 void gc_ropes_sweep(ant_t *js, bool minor) {
+  bool delay = minor && js->gc_policy.minor_surv_ewma < 128;
   if (js->rope_gc.conservative_marking) {
     ANT_ASSERT(!minor, "conservative rope sweep must be a major");
-    for (ant_pool_block_t *b = js->rope_gc.young.head; b;) {
+    ant_pool_t *pools[] = {&js->rope_gc.young, &js->rope_gc.survivor};
+    for (unsigned p = 0; p < 2; p++) for (ant_pool_block_t *b = pools[p]->head; b;) {
       ant_pool_block_t *next = b->next;
-      unlink_rope_block(&js->rope_gc.young, b);
+      unlink_rope_block(pools[p], b);
       if (b->used) promote_rope_block(js, b);
       else recycle_rope_block(&js->rope_gc.young, b);
       b = next;
@@ -252,11 +267,17 @@ void gc_ropes_sweep(ant_t *js, bool minor) {
   size_t count = js->rope_gc.mark_count;
   for (size_t i = 0; i < count; i++) {
     gc_rope_mark_t *m = &marks[i];
-    if (minor && m->kind != GC_ROPE_POOL_YOUNG) continue;
+    if (minor && m->kind != GC_ROPE_POOL_YOUNG && m->kind != GC_ROPE_POOL_SURVIVOR) continue;
 
-    if (m->kind == GC_ROPE_POOL_YOUNG) {
+    if (m->kind == GC_ROPE_POOL_YOUNG || m->kind == GC_ROPE_POOL_SURVIVOR) {
       unlink_rope_block(m->pool, m->block);
-      if (m->has_live) promote_rope_block(js, m->block);
+      if (m->has_live && delay && m->kind == GC_ROPE_POOL_YOUNG) {
+        // Seal this cohort. Appending fresh ropes would age them prematurely.
+        ant_pool_t *survivor = &js->rope_gc.survivor;
+        m->block->next = survivor->head;
+        if (survivor->head) survivor->head->prev = m->block;
+        survivor->head = m->block;
+      } else if (m->has_live) promote_rope_block(js, m->block);
       else recycle_rope_block(&js->rope_gc.young, m->block);
       continue;
     }
