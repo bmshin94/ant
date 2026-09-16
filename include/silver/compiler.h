@@ -238,6 +238,7 @@ typedef struct sv_compiler {
     uint32_t bc_off;
     uint32_t first_key;
     uint16_t key_count;
+    bool constant_array;
   } *shaped_sites;
   
   int shaped_site_count;

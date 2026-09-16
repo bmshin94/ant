@@ -156,32 +156,42 @@ void jit_emit_literals(jit_compile_t *c) {
     }
 
     case OP_ARRAY: {
+      sv_obj_site_cache_t *site = sv_obj_site_for_offset(c->func, (uint32_t)c->bc_off);
       uint16_t n = sv_get_u16(c->ip + 1);
       if (c->vs.sp < (int)n) {
         c->ok = false;
         break;
       }
-      for (int i = 0; i < (int)n; i++)
-        vstack_ensure_boxed(&c->vs, c->vs.sp - 1 - i, c->ctx, c->jit_func, c->r_d_slot);
-      for (int i = (int)n - 1; i >= 0; i--) {
-        MIR_reg_t elem = vstack_pop(&c->vs);
-        MIR_append_insn(c->ctx, c->jit_func,
-                        MIR_new_insn(c->ctx, MIR_MOV,
-                                     MIR_new_mem_op(c->ctx, MIR_T_I64,
-                                                    (MIR_disp_t)(i * (int)sizeof(ant_value_t)),
-                                                    c->r_args_buf, 0, 1),
-                                     MIR_new_reg_op(c->ctx, elem)));
+      bool shared = site && n && site->array_constant_count == n && site->shared_elements;
+      if (shared) {
+        // Immutable immediate backing lives with the code arena. The helper
+        // does not need a second copy of these constants in the argument buffer.
+        for (int i = 0; i < (int)n; i++) (void)vstack_pop(&c->vs);
+      } else {
+        for (int i = 0; i < (int)n; i++)
+          vstack_ensure_boxed(&c->vs, c->vs.sp - 1 - i, c->ctx, c->jit_func, c->r_d_slot);
+        for (int i = (int)n - 1; i >= 0; i--) {
+          MIR_reg_t elem = vstack_pop(&c->vs);
+          MIR_append_insn(c->ctx, c->jit_func,
+                          MIR_new_insn(c->ctx, MIR_MOV,
+                                       MIR_new_mem_op(c->ctx, MIR_T_I64,
+                                                      (MIR_disp_t)(i * (int)sizeof(ant_value_t)),
+                                                      c->r_args_buf, 0, 1),
+                                       MIR_new_reg_op(c->ctx, elem)));
+        }
       }
       MIR_reg_t dst = vstack_push(&c->vs);
       MIR_append_insn(c->ctx, c->jit_func,
-                      MIR_new_call_insn(c->ctx, 7,
+                      MIR_new_call_insn(c->ctx, 8,
                                         MIR_new_ref_op(c->ctx, c->array_proto),
                                         MIR_new_ref_op(c->ctx, c->imp_array),
                                         MIR_new_reg_op(c->ctx, dst),
                                         MIR_new_reg_op(c->ctx, c->r_vm),
                                         MIR_new_reg_op(c->ctx, c->r_js),
-                                        MIR_new_reg_op(c->ctx, c->r_args_buf),
-                                        MIR_new_int_op(c->ctx, (int64_t)n)));
+                                        shared ? MIR_new_uint_op(c->ctx, (uintptr_t)site->shared_elements)
+                                               : MIR_new_reg_op(c->ctx, c->r_args_buf),
+                                        MIR_new_int_op(c->ctx, (int64_t)n),
+                                        MIR_new_uint_op(c->ctx, (uintptr_t)site)));
       break;
     }
 

@@ -104,11 +104,11 @@ static void mir_emit_promise_protector_invalidation(
   } else {
     MIR_append_insn(ctx, fn,
                     MIR_new_insn(ctx, MIR_MOV, MIR_new_reg_op(ctx, promise_state),
-                                 MIR_new_mem_op(ctx, MIR_T_P,
-                                                (MIR_disp_t)offsetof(ant_object_t, promise_state), obj_ptr, 0, 1)));
+                                 MIR_new_mem_op(ctx, MIR_T_U8,
+                                                (MIR_disp_t)offsetof(ant_object_t, type_tag), obj_ptr, 0, 1)));
     MIR_append_insn(ctx, fn,
-                    MIR_new_insn(ctx, MIR_BNE, MIR_new_label_op(ctx, invalidate),
-                                 MIR_new_reg_op(ctx, promise_state), MIR_new_int_op(ctx, 0)));
+                    MIR_new_insn(ctx, MIR_BEQ, MIR_new_label_op(ctx, invalidate),
+                                 MIR_new_reg_op(ctx, promise_state), MIR_new_int_op(ctx, kTypePromise)));
     MIR_append_insn(ctx, fn,
                     MIR_new_insn(ctx, MIR_BNE, MIR_new_label_op(ctx, done),
                                  MIR_new_reg_op(ctx, obj_ptr),

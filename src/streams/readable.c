@@ -126,6 +126,7 @@ static ant_value_t rs_ctrl_queue_shift(ant_t *js, ant_value_t ctrl_obj) {
   ant_object_t *aobj = js_obj_ptr(arr);
   if (aobj->u.array.len == 0) return js_mkundef();
   ant_value_t val = aobj->u.array.data[0];
+  if (!js_array_ensure_writable(js, aobj)) return mkval(kTypeError, 0);
   uint32_t new_len = aobj->u.array.len - 1;
   for (uint32_t i = 0; i < new_len; i++)
     aobj->u.array.data[i] = aobj->u.array.data[i + 1];
@@ -150,6 +151,7 @@ static ant_value_t rs_reader_reqs_shift(ant_t *js, ant_value_t reader_obj) {
   ant_object_t *aobj = js_obj_ptr(arr);
   if (aobj->u.array.len == 0) return js_mkundef();
   ant_value_t val = aobj->u.array.data[0];
+  if (!js_array_ensure_writable(js, aobj)) return mkval(kTypeError, 0);
   uint32_t new_len = aobj->u.array.len - 1;
   for (uint32_t i = 0; i < new_len; i++)
     aobj->u.array.data[i] = aobj->u.array.data[i + 1];

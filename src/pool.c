@@ -309,9 +309,11 @@ void *js_type_alloc(ant_t *js, ant_alloc_kind_t kind, size_t size, size_t align)
   if (!js || size == 0) return NULL;
   if (align == 0) align = sizeof(void *);
 
-  js->gc_pool_alloc += size;
   size_t pool_threshold = gc_pool_major_threshold(js);
-  if (js->gc_pool_alloc >= pool_threshold) gc_run(js);
+  if (js->gc_pool_alloc >= pool_threshold || size >= pool_threshold - js->gc_pool_alloc)
+    gc_run(js);
+  // A major resets the interval counter; charge this allocation afterwards.
+  js->gc_pool_alloc += size;
   if (kind == ANT_ALLOC_STRING) return string_pool_alloc(js, size, align);
 
   ant_pool_t *pool = pool_for_kind(js, kind);

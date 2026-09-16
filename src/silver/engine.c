@@ -1444,7 +1444,7 @@ ant_value_t sv_execute_frame(sv_vm_t *vm, sv_func_t *func, ant_value_t this, ant
   L_THIS:      { sv_op_this(vm, frame);           NEXT(1); }
   L_GLOBAL:    { sv_op_global(vm, js);            NEXT(1); }
   L_OBJECT:    { sv_op_object(vm, js, func, ip);  NEXT(1); }
-  L_ARRAY:     { sv_op_array(vm, js, ip);         NEXT(3); }
+  L_ARRAY:     { sv_op_array(vm, js, func, ip);   NEXT(3); }
   L_SET_BRAND: { sv_op_set_brand(vm, ip);         NEXT(2); }
   
   L_REGEXP:        { sv_op_regexp(vm, js);                               NEXT(1); }

@@ -4,8 +4,8 @@
 #include <assert.h>
 #include <stdio.h>
 
-static_assert(sizeof(ant_object_flags_t) == 2, "object flags grew");
-static_assert(sizeof(void *) != 8 || ANT_INOBJ_MAX_SLOTS != 4 || sizeof(ant_object_t) == 152,
+static_assert(sizeof(ant_object_flags_t) == 4, "object flags must fit native-entry padding");
+static_assert(sizeof(void *) != 8 || ANT_INOBJ_MAX_SLOTS != 4 || sizeof(ant_object_t) == 128,
               "ordinary 64-bit object layout grew");
 
 int main(void) {

@@ -204,11 +204,39 @@ struct ant_isolate_t {
   size_t gc_closure_wm_minor_tried;
   size_t gc_pool_last_live;
 
+  struct {
+    size_t tick;
+    uint64_t last_run_ms;
+    uint64_t last_major_ms;
+    size_t nursery_threshold;
+    uint32_t major_every_n;
+    uint32_t minor_surv_ewma;
+    uint64_t major_end_ns;
+    uint64_t last_major_pause_ns;
+    uint64_t minor_pause_ns;
+    double allocated_since_major;
+    double gc_bytes_per_ns;
+    double allocation_bytes_per_ns;
+    size_t observed_objects;
+    size_t observed_arrays;
+    size_t observed_pool_alloc;
+    bool has_major_sample;
+    size_t major_heap_limit_bytes;
+    size_t object_allocation_ceiling;
+  } gc_policy;
+
   ant_object_t *objects_old;
   ant_object_t *pending_promises;
 
   size_t old_live_count;
   size_t minor_gc_count;
+
+  struct ant_gc_sample *gc_allocation_samples;
+  size_t gc_allocation_samples_len;
+  size_t gc_allocation_samples_cap;
+  size_t gc_opaque_remembered_objects;
+  struct ant_gc_reclaimer *gc_reclaimer;
+  bool gc_reclaimer_stopped;
 
   ant_object_t **remember_set;
   size_t remember_set_len;

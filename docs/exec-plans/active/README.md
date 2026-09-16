@@ -8,6 +8,10 @@ Store in-progress execution plans here.
 
 ## Active
 
+- [GC policy audit against V8](gc-policy-audit.md)
+
+- [Splay toward 9k](splay-9k.md)
+
 - [Symbol Description Accessor IC](symbol-description-accessor-ic.md)
 
 - [bench-v8 Regression Recovery](bench-v8-regression-recovery.md)
@@ -51,3 +55,5 @@ Recommended sections:
 - Decision log
 - Validation status
 - Follow-ups
+
+- [Generational throughput and allocation pressure](generational-throughput.md)

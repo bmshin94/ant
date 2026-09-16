@@ -8,7 +8,7 @@ static inline void *js_get_native(ant_value_t obj, uint32_t tag) {
   ant_object_t *o = js_obj_ptr(obj);
   
   if (!o || !tag) return NULL;
-  if (o->native.tag == tag) return o->native.ptr;
+  if (o->native_tag == tag) return o->native_ptr;
 
   ant_object_sidecar_t *sidecar = ant_object_sidecar(o);
   if (!sidecar) return NULL;
@@ -24,13 +24,14 @@ static inline void js_clear_native(ant_value_t obj, uint32_t tag) {
   if (!o || !tag) return;
 
   ant_object_sidecar_t *sidecar = ant_object_sidecar(o);
-  if (o->native.tag == tag) {
+  if (o->native_tag == tag) {
     if (sidecar && sidecar->native_count > 0) {
       sidecar->native_count--;
-      o->native = sidecar->native_entries[sidecar->native_count];
+      o->native_ptr = sidecar->native_entries[sidecar->native_count].ptr;
+      o->native_tag = sidecar->native_entries[sidecar->native_count].tag;
     } else {
-      o->native.ptr = NULL;
-      o->native.tag = 0;
+      o->native_ptr = NULL;
+      o->native_tag = 0;
     }
     return;
   }
@@ -48,9 +49,9 @@ static inline void js_set_native(ant_value_t obj, void *ptr, uint32_t tag) {
   ant_object_t *o = js_obj_ptr(obj);
   if (!o || !tag) return;
   
-  if (o->native.tag == 0 || o->native.tag == tag) {
-    o->native.ptr = ptr;
-    o->native.tag = tag;
+  if (o->native_tag == 0 || o->native_tag == tag) {
+    o->native_ptr = ptr;
+    o->native_tag = tag;
     return;
   }
 
@@ -79,7 +80,7 @@ static inline bool js_check_native_tag(ant_value_t obj, uint32_t tag) {
   ant_object_t *o = js_obj_ptr(obj);
   
   if (!o || !tag) return false;
-  if (o->native.tag == tag) return true;
+  if (o->native_tag == tag) return true;
 
   ant_object_sidecar_t *sidecar = ant_object_sidecar(o);
   if (!sidecar) return false;

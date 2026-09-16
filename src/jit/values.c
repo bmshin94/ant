@@ -999,7 +999,7 @@ MIR_reg_t mir_emit_dense_element_guard(
   MIR_append_insn(ctx, fn,
                   MIR_new_insn(ctx, MIR_MOV,
                                MIR_new_reg_op(ctx, flags),
-                               MIR_new_mem_op(ctx, MIR_T_U16,
+                               MIR_new_mem_op(ctx, MIR_T_U32,
                                               (MIR_disp_t)offsetof(ant_object_t, flags), ptr, 0, 1)));
   MIR_append_insn(ctx, fn,
                   MIR_new_insn(ctx, MIR_AND,
@@ -1007,7 +1007,7 @@ MIR_reg_t mir_emit_dense_element_guard(
                                MIR_new_reg_op(ctx, flags),
                                MIR_new_uint_op(ctx,
                                                ANT_OBJECT_FLAG_EXOTIC | ANT_OBJECT_FLAG_FAST_ARRAY | ANT_OBJECT_FLAG_DENSE_LENGTH_FITS |
-                                                   (writable ? ANT_OBJECT_FLAG_FROZEN : 0))));
+                                                   (writable ? ANT_OBJECT_FLAG_FROZEN | ANT_OBJECT_FLAG_COW_ELEMENTS : 0))));
   MIR_append_insn(ctx, fn,
                   MIR_new_insn(ctx, MIR_BNE,
                                MIR_new_label_op(ctx, slow),

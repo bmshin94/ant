@@ -1,0 +1,18 @@
+--- a/src/unix/kqueue.c
++++ b/src/unix/kqueue.c
+@@ -154,9 +154,14 @@
+ }
+ 
+ 
++/* Conservative collectors must not scan this scratch buffer in uv_run's
++ * timer callbacks after LTO inlining, or see stale words in I/O callbacks. */
++#if defined(__GNUC__)
++__attribute__((noinline))
++#endif
+ void uv__io_poll(uv_loop_t* loop, int timeout) {
+   uv__loop_internal_fields_t* lfields;
+-  struct kevent events[1024];
++  struct kevent events[1024] = {0};
+   struct kevent* ev;
+   struct timespec spec;
+   unsigned int nevents;

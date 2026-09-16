@@ -2,6 +2,7 @@
 #define ANT_OBJECT_H
 
 #include "types.h"
+#include "value.h"
 #include "sugar.h"
 #include "shapes.h"
 
@@ -15,6 +16,7 @@ typedef struct {
   ant_value_t (*getter)(ant_t *, ant_value_t, const char *, size_t);
   bool (*setter)(ant_t *, ant_value_t, const char *, size_t, ant_value_t);
   bool (*deleter)(ant_t *, ant_value_t, const char *, size_t);
+  ant_value_t (*keys)(ant_t *, ant_value_t);
 } ant_exotic_ops_t;
 
 typedef struct promise_handler {
@@ -83,6 +85,7 @@ typedef struct {
   ant_private_table_t private_table;
   ant_proxy_state_t *proxy_state;
   sv_eval_env_state_t *eval_env_state;
+  ant_exotic_ops_t *exotic_ops;
   
   uint8_t native_count;
   uint8_t native_cap;
@@ -114,12 +117,13 @@ typedef union ant_object_flags {
     uint8_t dense_length_fits: 1;
     uint8_t strict_arguments: 1;
     uint8_t regexp_brand: 1;
+    uint8_t cow_elements: 1;
   };
-  uint16_t raw;
-  uint8_t bytes[2];
+  uint32_t raw;
+  uint8_t bytes[4];
 } ant_object_flags_t;
 
-typedef enum: uint16_t {
+typedef enum: uint32_t {
   ANT_OBJECT_FLAG_EXTENSIBLE =
     1u << 0,
   ANT_OBJECT_FLAG_FROZEN =
@@ -142,10 +146,12 @@ typedef enum: uint16_t {
     1u << 14,
   ANT_OBJECT_FLAG_REGEXP_BRAND =
     1u << 15,
+  ANT_OBJECT_FLAG_COW_ELEMENTS =
+    1u << 16,
 } ant_object_flag_mask_t;
 
 static_assert(
-  sizeof(ant_object_flags_t) == 2,
+  sizeof(ant_object_flags_t) == 4,
   "ant_object_flags_t must cover the packed object bitfields"
 );
 
@@ -181,7 +187,9 @@ static inline bool ant_object_flag_masks_match_layout(void) {
   if (flags.raw != ANT_OBJECT_FLAG_STRICT_ARGUMENTS) return false;
 
   flags = (ant_object_flags_t){.regexp_brand = 1};
-  return flags.raw == ANT_OBJECT_FLAG_REGEXP_BRAND;
+  if (flags.raw != ANT_OBJECT_FLAG_REGEXP_BRAND) return false;
+  flags = (ant_object_flags_t){.cow_elements = 1};
+  return flags.raw == ANT_OBJECT_FLAG_COW_ELEMENTS;
 }
 
 typedef struct ant_object {
@@ -191,20 +199,20 @@ typedef struct ant_object {
   ant_shape_t *shape;
   ant_value_t *overflow_prop;
   
-  const ant_exotic_ops_t *exotic_ops;
-  ant_value_t (*exotic_keys)(ant_t *, ant_value_t);
-  
-  ant_promise_state_t *promise_state;
   ant_extra_slot_t *extra_slots;
   
   void (*finalizer)(ant_t *, struct ant_object *);
   ant_value_t inobj[ANT_INOBJ_MAX_SLOTS];
-  ant_native_entry_t native;
+  void *native_ptr;
+  uint32_t native_tag;
+  // These flags occupy the former native-entry padding, not an extra word.
+  ant_object_flags_t flags;
 
   union {
     struct { ant_value_t *data; uint32_t len; uint32_t cap; } array;
     struct { sv_closure_t *closure; } func;
     struct { ant_value_t value; } data;
+    struct { ant_value_t value; ant_promise_state_t *state; } promise;
   } u;
 
   uint32_t prop_count;
@@ -215,9 +223,12 @@ typedef struct ant_object {
   uint8_t extra_cap;
   uint8_t overflow_cap;
 
-  ant_object_flags_t flags;
   uint32_t ic_identity;
 } ant_object_t;
+
+static inline ant_promise_state_t *ant_object_promise_state(const ant_object_t *obj) {
+  return obj && obj->type_tag == kTypePromise ? obj->u.promise.state : NULL;
+}
 
 static inline void ant_object_guard_absence(ant_object_t *obj) {
   if (obj) obj->flags.guards_absence = 1;
@@ -236,6 +247,17 @@ static inline bool ant_object_has_sidecar(const ant_object_t *obj) {
 static inline ant_object_sidecar_t *ant_object_sidecar(const ant_object_t *obj) {
   if (!ant_object_has_sidecar(obj)) return NULL;
   return (ant_object_sidecar_t *)((uintptr_t)obj->extra_slots & ~ant_sidecar);
+}
+
+static inline ant_exotic_ops_t *ant_object_exotic_ops(const ant_object_t *obj) {
+  ant_object_sidecar_t *sidecar = ant_object_sidecar(obj);
+  return sidecar ? sidecar->exotic_ops : NULL;
+}
+
+typedef ant_value_t (*ant_exotic_keys_fn)(ant_t *, ant_value_t);
+static inline ant_exotic_keys_fn ant_object_exotic_keys(const ant_object_t *obj) {
+  ant_exotic_ops_t *ops = ant_object_exotic_ops(obj);
+  return ops ? ops->keys : NULL;
 }
 
 static inline ant_extra_slot_t *ant_object_extra_slots_ptr(const ant_object_t *obj) {

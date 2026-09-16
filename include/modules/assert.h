@@ -8,19 +8,19 @@ ant_value_t assert_library(ant_t *js);
 static inline bool promise_was_rejected(ant_value_t result) {
   if (vtype(result) != kTypePromise) return false;
   ant_object_t *obj = js_obj_ptr(js_as_obj(result));
-  return obj && obj->promise_state && obj->promise_state->state == 2;
+  return obj && ant_object_promise_state(obj) && ant_object_promise_state(obj)->state == 2;
 }
 
 static inline void promise_mark_handled(ant_value_t v) {
   if (vtype(v) != kTypePromise) return;
   ant_object_t *obj = js_obj_ptr(js_as_obj(v));
-  if (obj && obj->promise_state) obj->promise_state->has_rejection_handler = true;
+  if (obj && ant_object_promise_state(obj)) ant_object_promise_state(obj)->has_rejection_handler = true;
 }
 
 static inline bool promise_was_fulfilled(ant_value_t result) {
   if (vtype(result) != kTypePromise) return false;
   ant_object_t *obj = js_obj_ptr(js_as_obj(result));
-  return obj && obj->promise_state && obj->promise_state->state == 1;
+  return obj && ant_object_promise_state(obj) && ant_object_promise_state(obj)->state == 1;
 }
 
 #endif

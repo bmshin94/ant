@@ -37,6 +37,8 @@ typedef struct gc_func_mark_profile {
 void gc_run(ant_t *js);
 void gc_run_minor(ant_t *js);
 void gc_maybe(ant_t *js);
+void gc_policy_init(ant_t *js);
+double gc_policy_growth_factor(double gc_speed, double allocation_speed);
 void gc_pressure(ant_t *js);
 
 void gc_remember_add(ant_t *js, ant_object_t *obj);
@@ -58,6 +60,29 @@ void gc_func_mark_profile_reset(void);
 
 extern bool gc_disabled;
 gc_func_mark_profile_t gc_func_mark_profile_get(void);
+
+// Literal-site feedback lives with bytecode, not with every allocated object.
+// Samples are weak: the collector inspects them only after marking, before sweep.
+typedef struct {
+  uint16_t samples;
+  uint16_t survivors;
+  uint16_t probe_samples;
+  uint16_t probe_survivors;
+  uint8_t high_survival_epochs;
+  uint8_t probe_tick;
+  bool pretenured;
+} gc_alloc_site_t;
+
+void gc_track_allocation(ant_t *js, gc_alloc_site_t *site, ant_value_t value);
+void gc_allocation_feedback_cleanup(ant_t *js);
+
+// Only unreachable, exclusively owned array backing may cross to the worker.
+// Object headers, shapes, references, and finalizers remain on the isolate thread.
+void gc_reclaim_array_buffer(ant_t *js, void *buffer, size_t bytes);
+void gc_reclaim_flush(ant_t *js);
+void gc_reclaim_drain(ant_t *js);
+void gc_reclaim_shutdown(ant_t *js);
+size_t gc_reclaim_pending_bytes(ant_t *js);
 
 static inline bool gc_value_is_heap_ref(ant_value_t v) {
   if (!is_tagged(v)) return false;

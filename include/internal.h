@@ -136,7 +136,7 @@ static inline void ant_property_mutation_invalidate(
   ant_object_t *promise_proto = is_object_type(js->sym.promise_proto)
     ? js_obj_ptr(js->sym.promise_proto) : NULL;
 
-  if (!holder->promise_state && holder != promise_proto) return;
+  if (!ant_object_promise_state(holder) && holder != promise_proto) return;
   if (invalidates_constructor) {
     js->promise_constructor_protector_invalid = true;
     js->promise_species_protector_invalid = true;
@@ -268,6 +268,9 @@ ant_prop_loc_t lkp_sym_proto(ant_t *js, ant_value_t obj, ant_offset_t sym_off);
 ant_value_t mkobj(ant_t *js, ant_offset_t parent);
 ant_value_t js_mkobj_with_inobj_limit(ant_t *js, uint8_t inobj_limit);
 ant_value_t js_mkarr_dense_literal(ant_t *js, const ant_value_t *elements, uint32_t count);
+// Backing is code-arena-owned and contains only immediate (non-GC) values.
+ant_value_t js_mkarr_shared_literal(ant_t *js, const ant_value_t *elements, uint32_t count);
+bool js_array_ensure_writable(ant_t *js, ant_object_t *obj);
 ant_value_t js_mkobj_from_template(ant_t *js, ant_value_t template);
 
 ant_value_t js_for_in_keys(ant_t *js, ant_value_t obj);

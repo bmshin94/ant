@@ -126,6 +126,7 @@ static inline void sv_op_object(sv_vm_t *vm, ant_t *js, sv_func_t *func, uint8_t
 
   ant_value_t proto = js->sym.object_proto;
   if (vtype(proto) == kTypeObject) js_set_proto_init(obj, proto);
+  if (site) gc_track_allocation(js, &site->allocation, obj);
   vm->stack[vm->sp++] = obj;
 }
 
@@ -136,9 +137,28 @@ static inline void sv_op_private_token(sv_vm_t *vm, ant_t *js, uint8_t *ip) {
   vm->stack[vm->sp++] = obj;
 }
 
-static inline void sv_op_array(sv_vm_t *vm, ant_t *js, uint8_t *ip) {
+static inline ant_value_t sv_array_literal(
+  ant_t *js, sv_obj_site_cache_t *site, const ant_value_t *elements, uint32_t count
+) {
+  if (site && site->array_constant_count == count && count) {
+    if (!site->shared_elements) {
+      ant_value_t *shared = code_arena_bump(count * sizeof(*shared));
+      if (shared) {
+        memcpy(shared, elements, count * sizeof(*shared));
+        site->shared_elements = shared;
+        js->alloc_bytes.arrays += count * sizeof(*shared);
+      }
+    }
+    if (site->shared_elements) return js_mkarr_shared_literal(js, site->shared_elements, count);
+  }
+  return js_mkarr_dense_literal(js, elements, count);
+}
+
+static inline void sv_op_array(sv_vm_t *vm, ant_t *js, sv_func_t *func, uint8_t *ip) {
   uint16_t n = sv_get_u16(ip + 1);
-  ant_value_t arr = js_mkarr_dense_literal(js, &vm->stack[vm->sp - n], n);
+  sv_obj_site_cache_t *site = sv_obj_site_for_ip(func, ip);
+  ant_value_t arr = sv_array_literal(js, site, &vm->stack[vm->sp - n], n);
+  if (site) gc_track_allocation(js, &site->allocation, arr);
   vm->sp -= n;
   vm->stack[vm->sp++] = arr;
 }

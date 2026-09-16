@@ -497,11 +497,12 @@ void jit_setup_prototypes(jit_compile_t *c, MIR_type_t ret_type) {
 
   MIR_type_t arr_ret = MIR_JSVAL;
   c->array_proto = MIR_new_proto(c->ctx, "arr_proto",
-                                 1, &arr_ret, 4,
+                                 1, &arr_ret, 5,
                                  MIR_T_I64, "vm",
                                  MIR_T_I64, "js",
                                  MIR_T_P, "elements",
-                                 MIR_T_I32, "count");
+                                 MIR_T_I32, "count",
+                                 MIR_T_P, "site");
 
   MIR_type_t regexp_ret = MIR_JSVAL;
   c->regexp_proto = MIR_new_proto(c->ctx, "regexp_proto",

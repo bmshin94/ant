@@ -1499,6 +1499,7 @@ ant_value_t jit_helper_object(
   ant_value_t proto = js->sym.object_proto;
   
   if (vtype(proto) == kTypeObject) js_set_proto_init(obj, proto);
+  if (site) gc_track_allocation(js, &site->allocation, obj);
   return obj;
 }
 
@@ -1529,7 +1530,9 @@ ant_value_t jit_helper_object_template(sv_vm_t *vm, ant_t *js, sv_func_t *func, 
     GC_ROOT_RESTORE(js, mark);
   }
   
-  return js_mkobj_from_template(js, site->literal_template);
+  ant_value_t obj = js_mkobj_from_template(js, site->literal_template);
+  gc_track_allocation(js, &site->allocation, obj);
+  return obj;
 }
 
 void jit_helper_define_slot(
@@ -1540,8 +1543,11 @@ void jit_helper_define_slot(
   sv_define_slot(js, obj, val, str, len, slot);
 }
 
-ant_value_t jit_helper_array(sv_vm_t *vm, ant_t *js, ant_value_t *elements, int count) {
-  return js_mkarr_dense_literal(js, elements, (uint32_t)count);
+ant_value_t jit_helper_array(sv_vm_t *vm, ant_t *js, ant_value_t *elements, int count,
+                           sv_obj_site_cache_t *site) {
+  ant_value_t arr = sv_array_literal(js, site, elements, (uint32_t)count);
+  if (site) gc_track_allocation(js, &site->allocation, arr);
+  return arr;
 }
 
 ant_value_t jit_helper_catch_value(sv_vm_t *vm, ant_t *js, ant_value_t err) {

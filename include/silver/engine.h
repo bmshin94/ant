@@ -237,6 +237,10 @@ typedef struct {
   uint16_t key_count;
   bool shape_build_failed;
   ant_value_t literal_template;
+  gc_alloc_site_t allocation;
+  // Code-arena-owned backing, only for immediate-valued constant array literals.
+  const ant_value_t *shared_elements;
+  uint16_t array_constant_count;
 } sv_obj_site_cache_t;
 
 static constexpr uint32_t SV_GF_IC_AUX_MISS_SHIFT = 8u;

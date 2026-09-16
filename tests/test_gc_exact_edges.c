@@ -3,6 +3,8 @@
 #include "gc.h"
 #include "gc/objects.h"
 #include "gc/roots.h"
+#include "modules/bigint.h"
+#include <string.h>
 #include <assert.h>
 #include <stdio.h>
 
@@ -40,6 +42,26 @@ int main(void) {
   assert(gc_obj_is_marked(js_obj_ptr(young)));
   gc_run(js);
   assert(gc_obj_is_marked(js_obj_ptr(young)));
+
+  // Mixed ordinary slots must retain every reference kind without C-stack
+  // copies acting as roots, while immediate values remain unchanged.
+  js_set(js, root, "text", js_mkstr(js, "retained text", 13));
+  js_set(js, root, "bigint", js_mkbigint(js, "1234567890123", 13, false));
+  js_set(js, root, "symbol", js_mksym(js, "retained symbol"));
+  js_set(js, root, "number", js_mknum(42));
+  js_set(js, root, "boolean", js_true);
+  js_set(js, root, "null", js_mknull());
+  js_set(js, root, "undefined", js_mkundef());
+  gc_run(js);
+  assert(strcmp(js_getstr(js, js_get(js, root, "text"), NULL), "retained text") == 0);
+  uint64_t integer = 0;
+  assert(bigint_to_uint64_checked(js, js_get(js, root, "bigint"), &integer));
+  assert(integer == UINT64_C(1234567890123));
+  assert(strcmp(js_sym_desc(js_get(js, root, "symbol")), "retained symbol") == 0);
+  assert(js_getnum(js_get(js, root, "number")) == 42);
+  assert(js_get(js, root, "boolean") == js_true);
+  assert(js_get(js, root, "null") == js_mknull());
+  assert(js_get(js, root, "undefined") == js_mkundef());
 
   // Raw and tagged conservative candidates still take the validated path.
   ant_value_t raw_root = js_mkobj(js), tagged_root = js_mkobj(js);

@@ -296,7 +296,7 @@ static inline bool sv_tfb_dense_numeric_put(
 
   ant_object_t *ptr = js_obj_ptr(js_as_obj(object));
   if (!ptr || ptr->flags.is_exotic || ptr->flags.frozen ||
-      !ptr->flags.fast_array || !ptr->u.array.data)
+      ptr->flags.cow_elements || !ptr->flags.fast_array || !ptr->u.array.data)
     return false;
 
   uint32_t index = (uint32_t)number;

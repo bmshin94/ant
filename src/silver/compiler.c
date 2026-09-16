@@ -541,20 +541,21 @@ static void sv_func_init_obj_sites(const sv_compiler_t *c, sv_func_t *func) {
   uint32_t count = 0;
   for (int pc = 0; pc < func->code_len; ) {
     sv_op_t op = (sv_op_t)func->code[pc];
-    if (op == OP_OBJECT) count++;
+    if (op == OP_OBJECT || op == OP_ARRAY) count++;
     uint8_t size = (op < OP__COUNT) ? sv_op_size[op] : 1;
     pc += (size > 0) ? size : 1;
   }
   if (count == 0) return;
 
   func->obj_sites = code_arena_bump((size_t)count * sizeof(sv_obj_site_cache_t));
+  if (!func->obj_sites) return;
   memset(func->obj_sites, 0, (size_t)count * sizeof(sv_obj_site_cache_t));
   func->obj_site_count = count;
 
   uint32_t idx = 0;
   for (int pc = 0; pc < func->code_len && idx < count; ) {
     sv_op_t op = (sv_op_t)func->code[pc];
-    if (op == OP_OBJECT) func->obj_sites[idx++].bc_off = (uint32_t)pc;
+    if (op == OP_OBJECT || op == OP_ARRAY) func->obj_sites[idx++].bc_off = (uint32_t)pc;
     uint8_t size = (op < OP__COUNT) ? sv_op_size[op] : 1;
     pc += (size > 0) ? size : 1;
   }
@@ -569,6 +570,11 @@ static void sv_func_init_obj_sites(const sv_compiler_t *c, sv_func_t *func) {
       
       if (i >= count) break;
       if (func->obj_sites[i].bc_off != c->shaped_sites[s].bc_off) continue;
+
+      if (c->shaped_sites[s].constant_array) {
+        func->obj_sites[i++].array_constant_count = kc;
+        continue;
+      }
       
       uint32_t *ka = code_arena_bump((size_t)kc * sizeof(uint32_t));
       if (!ka) continue;
@@ -4525,6 +4531,9 @@ void compile_optional(sv_compiler_t *c, sv_ast_t *node) {
   compile_optional_get(c, node);
 }
 
+static void record_shaped_site(sv_compiler_t *c, uint32_t bc_off,
+                               const uint32_t *atom_idx, uint16_t count);
+
 void compile_array(sv_compiler_t *c, sv_ast_t *node) {
   int count = node->args.count;
   bool has_spread = false;
@@ -4537,12 +4546,23 @@ void compile_array(sv_compiler_t *c, sv_ast_t *node) {
   }
 
   if (!has_spread) {
+    bool constant = count > 0 && count <= UINT16_MAX;
     for (int i = 0; i < count; i++) {
       sv_ast_t *elem = node->args.items[i];
+      if (!elem || (elem->type != N_NUMBER && elem->type != N_BOOL &&
+                    elem->type != N_NULL && elem->type != N_UNDEF)) constant = false;
       if (elem && elem->type == N_EMPTY)
         emit_op(c, OP_EMPTY);
       else
         compile_expr(c, elem);
+    }
+    if (constant) {
+      int previous = c->shaped_site_count;
+      record_shaped_site(c, (uint32_t)c->code_len, NULL, 0);
+      if (c->shaped_site_count > previous) {
+        c->shaped_sites[previous].constant_array = true;
+        c->shaped_sites[previous].key_count = (uint16_t)count;
+      }
     }
     emit_op(c, OP_ARRAY);
     emit_u16(c, (uint16_t)count);
@@ -4615,8 +4635,9 @@ static void record_shaped_site(sv_compiler_t *c, uint32_t bc_off,
   c->shaped_sites[c->shaped_site_count].bc_off = bc_off;
   c->shaped_sites[c->shaped_site_count].first_key = (uint32_t)c->shaped_key_count;
   c->shaped_sites[c->shaped_site_count].key_count = count;
+  c->shaped_sites[c->shaped_site_count].constant_array = false;
   c->shaped_site_count++;
-  memcpy(c->shaped_keys + c->shaped_key_count, atom_idx, (size_t)count * sizeof(uint32_t));
+  if (count) memcpy(c->shaped_keys + c->shaped_key_count, atom_idx, (size_t)count * sizeof(uint32_t));
   c->shaped_key_count += count;
 }
 

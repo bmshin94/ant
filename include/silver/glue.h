@@ -330,7 +330,7 @@ ant_value_t jit_helper_put_global(
 
 ant_value_t jit_helper_array(
   sv_vm_t *vm, ant_t *js,
-  ant_value_t *elements, int count
+  ant_value_t *elements, int count, sv_obj_site_cache_t *site
 );
 
 ant_value_t jit_helper_for_of(

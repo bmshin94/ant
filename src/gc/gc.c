@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
+#include <math.h>
 #include "shapes.h"
 
 #include "gc/objects.h"
@@ -14,27 +15,97 @@
 
 bool gc_disabled = false;
 
-static size_t   gc_tick = 0;
-static uint64_t gc_last_run_ms = 0;
-static uint64_t gc_last_major_ms = 0;
-
-static size_t   gc_nursery_threshold = GC_NURSERY_THRESHOLD;
-static uint32_t gc_major_every_n     = GC_MAJOR_EVERY_N_MINOR;
-
-static uint32_t gc_major_live_growth_x256 = 384;
-static uint32_t gc_major_pool_growth_x256 = 384;
-
-static uint32_t gc_minor_surv_ewma = 128;
-static uint32_t gc_major_recl_ewma =  26;
-
-static uint64_t gc_now_ms(void) {
+static uint64_t gc_now_ns(void) {
 #ifdef ANT_WASM_EMBED
-  return (uint64_t)ant_wasm_now_ms();
+  return (uint64_t)(ant_wasm_now_ms() * 1000000.0);
 #else
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+  return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
+}
+
+static uint64_t gc_now_ms(void) { return gc_now_ns() / 1000000u; }
+
+void gc_policy_init(ant_t *js) {
+  js->gc_policy.nursery_threshold = GC_NURSERY_THRESHOLD;
+  js->gc_policy.major_every_n = GC_MAJOR_EVERY_N_MINOR;
+  js->gc_policy.minor_surv_ewma = 128;
+  js->gc_policy.major_end_ns = gc_now_ns();
+  js->gc_policy.object_allocation_ceiling = SIZE_MAX;
+}
+
+// Aim to leave 97% of elapsed time to the mutator, subject to a 4x memory
+// growth cap. This is a budget, not a guarantee of that utilization. A slow
+// collector or fast allocator needs more headroom, not more frequent majors.
+double gc_policy_growth_factor(double gc_speed, double allocation_speed) {
+  if (!(gc_speed > 0) || !(allocation_speed > 0) ||
+      !isfinite(gc_speed) || !isfinite(allocation_speed)) return 4.0;
+  double a = (gc_speed / allocation_speed) * 0.03;
+  if (!isfinite(a)) return 1.1;
+  double b = a - 0.97;
+  double factor = b > 0 ? a / b : 4.0;
+  if (factor < 1.1) factor = 1.1;
+  if (factor > 4.0) factor = 4.0;
+  return factor;
+}
+
+// Count managed allocation between collections without adding a counter store
+// to every object allocation. Pool counters include ropes; array growth is net
+// backing-store growth. External/native allocation is deliberately not modeled.
+static void gc_account_allocations(ant_t *js) {
+  size_t objects = js->obj_arena.live_count, arrays = js->alloc_bytes.arrays;
+  if (objects > js->gc_policy.observed_objects)
+    js->gc_policy.allocated_since_major +=
+      (double)(objects - js->gc_policy.observed_objects) * sizeof(ant_object_t);
+  if (arrays > js->gc_policy.observed_arrays)
+    js->gc_policy.allocated_since_major += arrays - js->gc_policy.observed_arrays;
+  if (js->gc_pool_alloc > js->gc_policy.observed_pool_alloc)
+    js->gc_policy.allocated_since_major += js->gc_pool_alloc - js->gc_policy.observed_pool_alloc;
+  js->gc_policy.observed_objects = objects;
+  js->gc_policy.observed_arrays = arrays;
+  js->gc_policy.observed_pool_alloc = js->gc_pool_alloc;
+}
+
+static void gc_finish_policy_sample(ant_t *js, uint64_t start, bool major, size_t heap_before) {
+  gc_reclaim_flush(js);
+  uint64_t end = gc_now_ns();
+  if (major) {
+    uint64_t interval = start > js->gc_policy.major_end_ns ? start - js->gc_policy.major_end_ns : 0;
+    uint64_t mutator = interval > js->gc_policy.minor_pause_ns ? interval - js->gc_policy.minor_pause_ns : 0;
+    double factor = 4.0;
+    if (js->gc_policy.has_major_sample && mutator && end > start &&
+        js->gc_policy.allocated_since_major > 0) {
+      double gc_speed = (double)heap_before / (double)(end - start);
+      double alloc_speed = js->gc_policy.allocated_since_major / (double)mutator;
+      js->gc_policy.gc_bytes_per_ns = js->gc_policy.gc_bytes_per_ns > 0
+        ? (js->gc_policy.gc_bytes_per_ns * 3 + gc_speed) / 4 : gc_speed;
+      js->gc_policy.allocation_bytes_per_ns = js->gc_policy.allocation_bytes_per_ns > 0
+        ? (js->gc_policy.allocation_bytes_per_ns * 3 + alloc_speed) / 4 : alloc_speed;
+      factor = gc_policy_growth_factor(js->gc_policy.gc_bytes_per_ns,
+                                      js->gc_policy.allocation_bytes_per_ns);
+    }
+    // One byte budget covers the entire managed heap. Independent object-count
+    // and pool budgets would trigger a full scan when just one component grows,
+    // even when the measured collector budget has ample remaining headroom.
+    double live_bytes = (double)js->obj_arena.live_count * sizeof(ant_object_t) +
+      js->alloc_bytes.arrays + js->gc_pool_last_live;
+    double limit = live_bytes * factor;
+    js->gc_policy.major_heap_limit_bytes = limit >= (double)SIZE_MAX
+      ? SIZE_MAX : (size_t)limit;
+    if (js->gc_policy.major_heap_limit_bytes < GC_POOL_PRESSURE_FLOOR)
+      js->gc_policy.major_heap_limit_bytes = GC_POOL_PRESSURE_FLOOR;
+    js->gc_policy.has_major_sample = true;
+    js->gc_policy.major_end_ns = end;
+    js->gc_policy.last_major_pause_ns = end > start ? end - start : 0;
+    js->gc_policy.minor_pause_ns = 0;
+    js->gc_policy.allocated_since_major = 0;
+  } else if (end > start) {
+    js->gc_policy.minor_pause_ns += end - start;
+  }
+  js->gc_policy.observed_objects = js->obj_arena.live_count;
+  js->gc_policy.observed_arrays = js->alloc_bytes.arrays;
+  js->gc_policy.observed_pool_alloc = js->gc_pool_alloc;
 }
 
 static size_t gc_scaled_threshold(size_t base_live, uint32_t growth_x256, size_t floor) {
@@ -60,71 +131,61 @@ static size_t gc_pool_live_bytes(ant_t *js) {
 }
 
 size_t gc_live_major_threshold(ant_t *js) {
+  if (js->gc_policy.has_major_sample) {
+    size_t limit = js->gc_policy.major_heap_limit_bytes;
+    size_t pool = js->gc_pool_last_live;
+    size_t arrays = js->alloc_bytes.arrays;
+    size_t remaining = limit > pool ? limit - pool : 0;
+    remaining = remaining > arrays ? remaining - arrays : 0;
+    remaining = remaining > js->gc_pool_alloc ? remaining - js->gc_pool_alloc : 0;
+    size_t threshold = remaining / sizeof(ant_object_t);
+    if (threshold < GC_MAJOR_SCALE) threshold = GC_MAJOR_SCALE;
+    if (threshold > js->gc_policy.object_allocation_ceiling)
+      threshold = js->gc_policy.object_allocation_ceiling;
+    return threshold;
+  }
   size_t threshold = gc_scaled_threshold(
     js->gc_last_live, 
-    gc_major_live_growth_x256, GC_MAJOR_SCALE
+    384, GC_MAJOR_SCALE
   );
 
-  bool nursery_churn = gc_minor_surv_ewma <= 64;   // <= 25% young survival
-  bool nursery_sticky = gc_minor_surv_ewma >= 160; // >= 62.5% young survival
-  bool major_pays = gc_major_recl_ewma >= 51;      // >= 20% old-gen reclaim
-  bool major_wasteful = gc_major_recl_ewma <= 13;  // <= 5% old-gen reclaim
+  bool nursery_churn = js->gc_policy.minor_surv_ewma <= 64;   // <= 25% young survival
+  bool nursery_sticky = js->gc_policy.minor_surv_ewma >= 160; // >= 62.5% young survival
 
   if (js->gc_use_nursery_major_floor) {
-    if (nursery_sticky || (major_pays && !nursery_churn)) js->gc_use_nursery_major_floor = false;
-  } else if (nursery_churn || major_wasteful) js->gc_use_nursery_major_floor = true;
+    if (nursery_sticky) js->gc_use_nursery_major_floor = false;
+  } else if (nursery_churn) js->gc_use_nursery_major_floor = true;
 
-  if (!js->gc_use_nursery_major_floor) return threshold;
-  size_t nursery_floor = js->old_live_count + gc_nursery_threshold;
-  
-  return threshold < nursery_floor ? nursery_floor : threshold;
+  if (js->gc_use_nursery_major_floor) {
+    size_t nursery_floor = js->gc_last_live + js->gc_policy.nursery_threshold;
+    if (threshold < nursery_floor) threshold = nursery_floor;
+  }
+  // Leave enough arena headroom for the scheduler's allocation tick interval.
+  if (threshold > js->gc_policy.object_allocation_ceiling)
+    threshold = js->gc_policy.object_allocation_ceiling;
+  return threshold;
 }
 
 size_t gc_pool_major_threshold(ant_t *js) {
-  return gc_scaled_threshold(js->gc_pool_last_live, gc_major_pool_growth_x256, GC_POOL_PRESSURE_FLOOR);
+  if (js->gc_policy.has_major_sample) {
+    size_t objects = js->obj_arena.live_count * sizeof(ant_object_t);
+    size_t remaining = js->gc_policy.major_heap_limit_bytes;
+    remaining = remaining > objects ? remaining - objects : 0;
+    remaining = remaining > js->alloc_bytes.arrays ? remaining - js->alloc_bytes.arrays : 0;
+    remaining = remaining > js->gc_pool_last_live ? remaining - js->gc_pool_last_live : 0;
+    return remaining < GC_POOL_PRESSURE_FLOOR ? GC_POOL_PRESSURE_FLOOR : remaining;
+  }
+  return gc_scaled_threshold(js->gc_pool_last_live, 384, GC_POOL_PRESSURE_FLOOR);
 }
 
-static void gc_adapt_nursery(size_t young_before, size_t survivors) {
+static void gc_adapt_nursery(ant_t *js, size_t young_before, size_t survivors) {
   if (young_before == 0) return;
   uint32_t rate = (uint32_t)((survivors * 256) / young_before);
-  gc_minor_surv_ewma = (gc_minor_surv_ewma * 3 + rate) >> 2;
-  if (gc_minor_surv_ewma < 64 && gc_nursery_threshold > GC_NURSERY_THRESHOLD / 2)
-    gc_nursery_threshold -= gc_nursery_threshold / 4;
-  else if (gc_nursery_threshold < GC_NURSERY_THRESHOLD)
-    gc_nursery_threshold = GC_NURSERY_THRESHOLD;
-}
-
-static void gc_adapt_major_interval(size_t live_before, size_t live_after) {
-  if (live_before == 0) return;
-  size_t freed = live_before > live_after ? live_before - live_after : 0;
-  uint32_t rate = (uint32_t)((freed * 256) / live_before);
-  gc_major_recl_ewma = (gc_major_recl_ewma * 3 + rate) >> 2;
-
-  bool gen_ineffective = gc_minor_surv_ewma  > 192; // >75% nursery survival
-  bool high_reclaim    = gc_major_recl_ewma  >  51; // >20% old-gen freed
-  bool low_reclaim     = gc_major_recl_ewma  <  13; // < 5% old-gen freed
-
-  if ((gen_ineffective && !low_reclaim) || high_reclaim) {
-    if (gc_major_every_n > 2) gc_major_every_n--;
-  } else if (!gen_ineffective && low_reclaim) {
-    if (gc_major_every_n < GC_MAJOR_EVERY_N_MINOR * 4) gc_major_every_n++;
-  }
-
-  if (gen_ineffective && low_reclaim) {
-    if (gc_major_live_growth_x256 < 1024) gc_major_live_growth_x256 += 96;
-    if (gc_major_pool_growth_x256 < 1536) gc_major_pool_growth_x256 += 128;
-  } else if (low_reclaim) {
-    if (gc_major_live_growth_x256 < 896) gc_major_live_growth_x256 += 48;
-    if (gc_major_pool_growth_x256 < 1280) gc_major_pool_growth_x256 += 64;
-  } else if (high_reclaim) {
-    if (gc_major_live_growth_x256 > 320) gc_major_live_growth_x256 -= 32;
-    if (gc_major_pool_growth_x256 > 320) gc_major_pool_growth_x256 -= 32;
-  } else {
-    if (gc_major_live_growth_x256 > 384) gc_major_live_growth_x256 -= 16;
-    else if (gc_major_live_growth_x256 < 384) gc_major_live_growth_x256 += 16;
-    if (gc_major_pool_growth_x256 > 384) gc_major_pool_growth_x256 -= 16;
-    else if (gc_major_pool_growth_x256 < 384) gc_major_pool_growth_x256 += 16;
-  }
+  js->gc_policy.minor_surv_ewma = (js->gc_policy.minor_surv_ewma * 3 + rate) >> 2;
+  if (js->gc_policy.minor_surv_ewma < 64 && js->gc_policy.nursery_threshold > GC_NURSERY_THRESHOLD / 2)
+    js->gc_policy.nursery_threshold -= js->gc_policy.nursery_threshold / 4;
+  else if (js->gc_policy.nursery_threshold < GC_NURSERY_THRESHOLD)
+    js->gc_policy.nursery_threshold = GC_NURSERY_THRESHOLD;
 }
 
 static void gc_mark_str(ant_t *js, ant_value_t root) {
@@ -233,6 +294,10 @@ static void gc_clear_remembered_builders(ant_t *js) {
 
 void gc_run(ant_t *js) {
   if (__builtin_expect(gc_disabled, 0)) return;
+  uint64_t start_ns = gc_now_ns();
+  gc_account_allocations(js);
+  size_t heap_before = js->obj_arena.live_count * sizeof(ant_object_t) +
+    js->alloc_bytes.arrays + gc_pool_live_bytes(js);
   js->gc_running = true;
   
   gc_ropes_begin_result_t rope_begin = gc_ropes_begin(js, false);
@@ -241,7 +306,6 @@ void gc_run(ant_t *js) {
     "major rope marking cannot request another major"
   );
 
-  size_t live_before = js->obj_arena.live_count;
 
   gc_bigints_begin(js);
   gc_strings_begin(js);
@@ -274,14 +338,16 @@ void gc_run(ant_t *js) {
   js->gc_closure_promoted_since_major = 0;
   js->gc_remember_overflow = false;
 
-  gc_adapt_major_interval(live_before, js->obj_arena.live_count);
-  gc_last_run_ms = gc_now_ms();
-  gc_last_major_ms = gc_last_run_ms;
+  js->gc_policy.last_run_ms = gc_now_ms();
+  js->gc_policy.last_major_ms = js->gc_policy.last_run_ms;
+  gc_finish_policy_sample(js, start_ns, true, heap_before);
   js->gc_running = false;
 }
 
 void gc_run_minor(ant_t *js) {
   if (__builtin_expect(gc_disabled, 0)) return;
+  uint64_t start_ns = gc_now_ns();
+  gc_account_allocations(js);
   js->gc_running = true;
 
   if (__builtin_expect(js->gc_remember_overflow, 0)) {
@@ -305,49 +371,59 @@ void gc_run_minor(ant_t *js) {
 
   ant_ic_obj_epoch_bump();
 
-  js->gc_last_live = js->obj_arena.live_count;
-  js->old_live_count = js->obj_arena.live_count;
+  // Bootstrap until a major provides a retained-size baseline.
+  if (!js->gc_policy.has_major_sample) js->gc_last_live = js->obj_arena.live_count;
   js->minor_gc_count++;
 
   size_t survivors = js->obj_arena.live_count > old_before
     ? js->obj_arena.live_count - old_before : 0;
 
   js->gc_closure_at_minor = js->gc_closure_alloc;
-  gc_adapt_nursery(young_before, survivors);
-  gc_last_run_ms = gc_now_ms();
+  gc_adapt_nursery(js, young_before, survivors);
+  js->gc_policy.last_run_ms = gc_now_ms();
+  gc_finish_policy_sample(js, start_ns, false, 0);
   js->gc_running = false;
 }
 
 void gc_pressure(ant_t *js) {
   if (__builtin_expect(gc_disabled, 0)) return;
-  gc_tick = GC_MIN_TICK;
+  js->gc_policy.tick = GC_MIN_TICK;
   gc_maybe(js);
+}
+
+static bool gc_has_remembered_owner_debt(ant_t *js) {
+  // A few persistent owners do not justify repeatedly sweeping a large live
+  // old heap. Amortize debt-only majors against observed minor collection work;
+  // independent heap/pool/closure pressure checks still enforce their budgets.
+  if (js->gc_policy.minor_pause_ns < js->gc_policy.last_major_pause_ns) return false;
+  return js->gc_opaque_remembered_objects || js->remembered_upvalue_len ||
+    js->remembered_closure_len || js->remembered_func_const_len ||
+    js->remembered_coroutine_len;
 }
 
 void gc_maybe(ant_t *js) {
   if (__builtin_expect(gc_disabled, 0)) return;
-  if (++gc_tick < GC_MIN_TICK) return;
+  if (++js->gc_policy.tick < GC_MIN_TICK) return;
   
   size_t live = js->obj_arena.live_count;
   size_t young_count = live > js->old_live_count ? live - js->old_live_count : 0;
   size_t closure_young = js->gc_closure_alloc > js->gc_closure_at_minor
     ? js->gc_closure_alloc - js->gc_closure_at_minor : 0;
 
-  if (young_count >= gc_nursery_threshold ||
+  if (young_count >= js->gc_policy.nursery_threshold ||
       js->rope_gc.young_alloc >= GC_ROPE_NURSERY_THRESHOLD ||
       closure_young >= GC_CLOSURE_NURSERY_THRESHOLD) {
-    gc_tick = 0;
-    size_t live_before_minor = js->obj_arena.live_count;
-    size_t major_threshold = gc_live_major_threshold(js);
-    size_t pool_threshold = gc_pool_major_threshold(js);
-
+    js->gc_policy.tick = 0;
     gc_run_minor(js);
 
-    if (js->minor_gc_count >= gc_major_every_n) {
-      bool major_due = false;
+    if (js->minor_gc_count >= js->gc_policy.major_every_n) {
+      // These coarse remembered owners can only be proved dead by a major.
+      // Bound that repeated work by measured collection cost: recovered nursery
+      // headroom must not defer their liveness check indefinitely.
+      bool major_due = gc_has_remembered_owner_debt(js);
       
-      if (live_before_minor >= major_threshold) major_due = true;
-      else if (js->gc_pool_alloc >= pool_threshold) major_due = true;
+      if (js->obj_arena.live_count >= gc_live_major_threshold(js)) major_due = true;
+      else if (js->gc_pool_alloc >= gc_pool_major_threshold(js)) major_due = true;
       else if (js->closure_arena.watermark - js->gc_closure_wm_at_major >= GC_CLOSURE_MAJOR_GROWTH) major_due = true;
       else if (js->gc_closure_promoted_since_major >= GC_CLOSURE_PROMOTED_MAJOR) major_due = true;
       
@@ -362,17 +438,18 @@ void gc_maybe(ant_t *js) {
 
   size_t threshold = gc_live_major_threshold(js);
   if (live >= threshold) {
-    gc_tick = 0;
+    js->gc_policy.tick = 0;
     if (young_count >= live / 4) {
       gc_run_minor(js);
-      if (js->obj_arena.live_count < threshold) return;
+      if (js->obj_arena.live_count < gc_live_major_threshold(js) &&
+          !(js->minor_gc_count >= js->gc_policy.major_every_n && gc_has_remembered_owner_debt(js))) return;
     }
     gc_run(js);
     return;
   }
 
   if (js->closure_arena.watermark - js->gc_closure_wm_at_major >= GC_CLOSURE_MAJOR_GROWTH) {
-    gc_tick = 0;
+    js->gc_policy.tick = 0;
     if (js->closure_arena.watermark > js->gc_closure_wm_minor_tried) {
       js->gc_closure_wm_minor_tried = js->closure_arena.watermark;
       gc_run_minor(js);
@@ -382,19 +459,19 @@ void gc_maybe(ant_t *js) {
     return;
   }
 
-  if (gc_tick < 8192) return;
+  if (js->gc_policy.tick < 8192) return;
 
   if (young_count == 0 && js->gc_pool_alloc == 0) {
-    gc_tick = 0;
+    js->gc_policy.tick = 0;
     return;
   }
 
-  if (gc_now_ms() - gc_last_run_ms < GC_FORCE_INTERVAL_MS) {
-    gc_tick = 0;
+  if (gc_now_ms() - js->gc_policy.last_run_ms < GC_FORCE_INTERVAL_MS) {
+    js->gc_policy.tick = 0;
     return;
   }
 
-  gc_tick = 0;
-  if (gc_now_ms() - gc_last_major_ms >= GC_FORCE_MAJOR_INTERVAL_MS) gc_run(js);
+  js->gc_policy.tick = 0;
+  if (gc_now_ms() - js->gc_policy.last_major_ms >= GC_FORCE_MAJOR_INTERVAL_MS) gc_run(js);
   else gc_run_minor(js);
 }

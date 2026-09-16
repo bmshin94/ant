@@ -386,6 +386,27 @@ gc_exact_edges_test = executable(
 )
 test('gc-exact-edges', gc_exact_edges_test)
 
+gc_allocation_sites_test = executable(
+  'test-gc-allocation-sites',
+  files('tests/test_gc_allocation_sites.c'),
+  dependencies: libant_dep,
+  c_args: ['-UNDEBUG'],
+  build_by_default: false
+)
+test('gc-allocation-sites', gc_allocation_sites_test)
+
+if host_machine.system() == 'darwin'
+  gc_event_loop_stack_test = executable(
+    'test-gc-event-loop-stack',
+    files('tests/test_gc_event_loop_stack.c'),
+    dependencies: libant_dep,
+    c_args: ['-UNDEBUG'],
+    build_by_default: false
+  )
+  test('gc-event-loop-stack', gc_event_loop_stack_test)
+endif
+
+
 arguments_storage_test = executable(
   'test-arguments-storage',
   files('tests/test_arguments_storage.c'),

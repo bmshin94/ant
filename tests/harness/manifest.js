@@ -19,6 +19,7 @@ export function targets() {
     'test_assert_bigint.cjs',
     'test_jit_derived_ctor.cjs',
     'test_jit_array_literal.cjs',
+    'test_array_literal_cow.cjs',
     'test_jit_constant_integer_boxing.cjs',
     'test_jit_for_of.cjs',
     'test_jit_strict_arguments.cjs',
