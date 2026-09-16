@@ -26,12 +26,12 @@ jobs:
     # runs-on/container/shell must be hardcoded
     runs-on: |-
       ${{ case(
-        inputs.platform == 'linux-glibc-x64', 'ubuntu-24.04',
-        inputs.platform == 'linux-glibc-aarch64', 'ubuntu-24.04-arm',
-        inputs.platform == 'linux-musl-x64', 'ubuntu-24.04',
-        inputs.platform == 'linux-musl-aarch64', 'ubuntu-24.04-arm',
-        inputs.platform == 'macos-x64', 'macos-15',
-        inputs.platform == 'macos-aarch64', 'macos-15',
+        inputs.platform == 'linux-glibc-x64', 'namespace-profile-ant-x86',
+        inputs.platform == 'linux-glibc-aarch64', 'namespace-profile-ant-arm',
+        inputs.platform == 'linux-musl-x64', 'namespace-profile-ant-x86',
+        inputs.platform == 'linux-musl-aarch64', 'namespace-profile-ant-arm',
+        inputs.platform == 'macos-x64', 'namespace-profile-ant-darwin',
+        inputs.platform == 'macos-aarch64', 'namespace-profile-ant-darwin',
         inputs.platform == 'windows-x64', 'windows-latest',
         'ubuntu-24.04'
       ) }}
