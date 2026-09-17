@@ -55,6 +55,16 @@ for (const part of text.split('\n')) for (let o = 0; o < part.length; o += 29) r
 const back = JSON.parse(JSON.stringify(rows));
 assert(back.length === rows.length && back.every((r, i) => r === rows[i]), 'sliced surrogate rows roundtrip');
 
+const ffff = '\uffff';
+assert(JSON.parse('"\\uffff"') === ffff, 'escaped U+FFFF alone');
+assert(JSON.parse('"' + ffff + '"') === ffff, 'raw U+FFFF alone');
+assert(units(JSON.parse('"\\uffff\\ud800"')) === 'ffff,d800', 'U+FFFF then lone');
+assert(units(JSON.parse('"\\ud800\\uffff"')) === 'd800,ffff', 'lone then U+FFFF');
+assert(units(JSON.parse('"\\uFFFF\\uffff\\udfff"')) === 'ffff,ffff,dfff', 'double U+FFFF then lone');
+assert(units(JSON.parse('["' + high + ffff + '"]')[0]) === 'd83d,ffff', 'raw lone then raw U+FFFF');
+assert(JSON.parse(JSON.stringify(ffff + high + ffff + ffff)) === ffff + high + ffff + ffff, 'roundtrip U+FFFF around lone');
+assert(JSON.parse('{"' + ffff + '":"\\ud800"}')[ffff].charCodeAt(0) === 0xd800, 'U+FFFF key with lone value');
+
 const bad = [
   '"\\ud800',
   '"\\uD80"',

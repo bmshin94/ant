@@ -56,14 +56,41 @@ static inline bool json_read_hex4(const char *p, uint32_t *out) {
 }
 
 /*
- * yyjson rejects lone surrogate escapes (\uD800..\uDFFF without a partner) and
- * raw WTF-8 surrogate bytes, both of which JSON.parse must accept. Rewrite the
- * lone escapes into WTF-8 so a retry with ALLOW_INVALID_UNICODE can read them.
- * That flag also makes yyjson accept raw control characters inside strings, so
- * reject those here to keep them SyntaxErrors. Only runs after a parse failure.
+ * yyjson built standard-only rejects lone surrogate escapes
+ * (\uD800..\uDFFF without a partner) and raw WTF-8 surrogate bytes, both of
+ * which JSON.parse must accept. When a parse fails on an invalid string, the
+ * text is rewritten so each lone surrogate becomes a U+FFFF marker plus four
+ * hex digits (a genuine U+FFFF is doubled), parsed again in standard mode, and
+ * the markers are decoded back into WTF-8 inside the document's own strings.
+ * Valid input never takes this path.
  */
-static char *json_wtf8_rewrite(const char *src, size_t len, size_t *out_len) {
-  char *dst = malloc(len ? len : 1);
+#define JSON_MARK "\xEF\xBF\xBF"
+#define JSON_MARK_LEN 3
+
+static inline bool json_is_mark(const char *p) {
+  return (unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBF && (unsigned char)p[2] == 0xBF;
+}
+
+static inline size_t json_write_marked(char *dst, uint32_t cu) {
+  static const char hex[] = "0123456789abcdef";
+  memcpy(dst, JSON_MARK, JSON_MARK_LEN);
+  dst[3] = hex[(cu >> 12) & 15];
+  dst[4] = hex[(cu >> 8) & 15];
+  dst[5] = hex[(cu >> 4) & 15];
+  dst[6] = hex[cu & 15];
+  return 7;
+}
+
+static inline size_t json_write_wtf8(char *dst, uint32_t cu) {
+  dst[0] = (char)(0xE0 | (cu >> 12));
+  dst[1] = (char)(0x80 | ((cu >> 6) & 0x3F));
+  dst[2] = (char)(0x80 | (cu & 0x3F));
+  return 3;
+}
+
+static char *json_surrogate_rewrite(const char *src, size_t len, size_t *out_len) {
+  if (len > SIZE_MAX / 3 - 1) return NULL;
+  char *dst = malloc(len * 3 + 1);
   if (!dst) return NULL;
 
   size_t i = 0, n = 0;
@@ -79,9 +106,20 @@ static char *json_wtf8_rewrite(const char *src, size_t len, size_t *out_len) {
       continue;
     }
 
-    if (c < 0x20) {
-      free(dst);
-      return NULL;
+    if (c == 0xED && i + 3 <= len) {
+      unsigned char c1 = (unsigned char)src[i + 1], c2 = (unsigned char)src[i + 2];
+      if (c1 >= 0xA0 && c1 <= 0xBF && (c2 & 0xC0) == 0x80) {
+        n += json_write_marked(dst + n, ((c & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F));
+        i += 3;
+        continue;
+      }
+    }
+
+    if (c == 0xEF && i + 3 <= len && json_is_mark(src + i)) {
+      memcpy(dst + n, JSON_MARK JSON_MARK, 2 * JSON_MARK_LEN);
+      n += 2 * JSON_MARK_LEN;
+      i += 3;
+      continue;
     }
 
     if (c != '\\') {
@@ -96,6 +134,13 @@ static char *json_wtf8_rewrite(const char *src, size_t len, size_t *out_len) {
       memcpy(dst + n, src + i, take);
       n += take;
       i += take;
+      continue;
+    }
+
+    if (hi == 0xFFFF) {
+      memcpy(dst + n, JSON_MARK JSON_MARK, 2 * JSON_MARK_LEN);
+      n += 2 * JSON_MARK_LEN;
+      i += 6;
       continue;
     }
 
@@ -116,9 +161,7 @@ static char *json_wtf8_rewrite(const char *src, size_t len, size_t *out_len) {
       continue;
     }
 
-    dst[n++] = (char)(0xE0 | (hi >> 12));
-    dst[n++] = (char)(0x80 | ((hi >> 6) & 0x3F));
-    dst[n++] = (char)(0x80 | (hi & 0x3F));
+    n += json_write_marked(dst + n, hi);
     i += 6;
   }
 
@@ -126,17 +169,58 @@ static char *json_wtf8_rewrite(const char *src, size_t len, size_t *out_len) {
   return dst;
 }
 
+static void json_surrogate_decode(yyjson_doc *doc) {
+  yyjson_val *vals = yyjson_doc_get_root(doc);
+  size_t count = yyjson_doc_get_val_count(doc);
+
+  for (size_t k = 0; k < count; k++) {
+    yyjson_val *val = vals + k;
+    if (!yyjson_is_str(val)) continue;
+
+    size_t len = yyjson_get_len(val);
+    char *str = (char *)yyjson_get_str(val);
+    size_t r = 0;
+    
+    while (r + JSON_MARK_LEN <= len && !json_is_mark(str + r)) r++;
+    if (r + JSON_MARK_LEN > len) continue;
+
+    size_t w = r;
+    while (r < len) {
+      if (len - r >= 2 * JSON_MARK_LEN && json_is_mark(str + r) && json_is_mark(str + r + JSON_MARK_LEN)) {
+        memcpy(str + w, JSON_MARK, JSON_MARK_LEN);
+        w += JSON_MARK_LEN;
+        r += 2 * JSON_MARK_LEN;
+        continue;
+      }
+      
+      uint32_t cu;
+      if (len - r >= 7 && json_is_mark(str + r) && json_read_hex4(str + r + JSON_MARK_LEN, &cu)) {
+        w += json_write_wtf8(str + w, cu);
+        r += 7;
+        continue;
+      }
+      
+      str[w++] = str[r++];
+    }
+
+    str[w] = '\0';
+    yyjson_set_strn(val, str, w);
+  }
+}
+
 static yyjson_doc *json_read_doc(const char *str, size_t len) {
   yyjson_read_err err;
   yyjson_doc *doc = yyjson_read_opts((char *)str, len, 0, NULL, &err);
   if (doc || err.code != YYJSON_READ_ERROR_INVALID_STRING) return doc;
 
-  size_t wtf8_len = 0;
-  char *wtf8 = json_wtf8_rewrite(str, len, &wtf8_len);
-  if (!wtf8) return NULL;
+  size_t rewritten_len = 0;
+  char *rewritten = json_surrogate_rewrite(str, len, &rewritten_len);
+  if (!rewritten) return NULL;
 
-  doc = yyjson_read_opts(wtf8, wtf8_len, YYJSON_READ_ALLOW_INVALID_UNICODE, NULL, NULL);
-  free(wtf8);
+  doc = yyjson_read_opts(rewritten, rewritten_len, 0, NULL, NULL);
+  free(rewritten);
+  if (doc) json_surrogate_decode(doc);
+  
   return doc;
 }
 
