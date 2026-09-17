@@ -16,6 +16,8 @@
 #include "streams/brotli.h"
 #include "modules/buffer.h"
 #include "modules/events.h"
+#include "modules/stream.h"
+#include "modules/timer.h"
 #include "modules/symbol.h"
 #include "modules/zlib.h"
 
@@ -69,8 +71,6 @@ typedef struct zlib_stream_s {
 } zlib_stream_t;
 
 static zlib_stream_t *g_active_streams = NULL;
-
-static ant_value_t js_zlib_destroy(ant_params_t);
 
 static bool zlib_kind_is_compress(zlib_kind_t k) {
   return 
@@ -263,7 +263,7 @@ static ant_value_t zlib_make_buffer(ant_t *js, const uint8_t *data, size_t len) 
 
 static void zlib_emit_data(ant_t *js, ant_value_t obj, const uint8_t *data, size_t len) {
   ant_value_t buf = zlib_make_buffer(js, data, len);
-  if (!is_err(buf)) eventemitter_emit_args(js, obj, "data", &buf, 1);
+  if (!is_err(buf)) stream_readable_push(js, obj, buf, js_mkundef());
 }
 
 typedef struct { ant_t *js; ant_value_t obj; } brotli_emit_ctx_t;
@@ -336,7 +336,15 @@ static ant_value_t zlib_do_process(
 
     size_t have = chunk_size - st->strm.avail_out;
     if (have > 0) zlib_emit_data(js, st->obj, out, have);
-    if (ret == Z_STREAM_END) break;
+    if (st->destroyed) break;
+    
+    if (ret == Z_STREAM_END) {
+      // Like Node, unused input after DEFLATE EOF ends the readable side;
+      // ws appends its trailer here, then checks endEmitted in flush().
+      if ((st->kind == ZLIB_KIND_INFLATE || st->kind == ZLIB_KIND_INFLATE_RAW) && st->strm.avail_in > 0)
+        stream_readable_push(js, st->obj, js_mknull(), js_mkundef());
+      break;
+    }
   } while (st->strm.avail_out == 0);
 
   free(out);
@@ -438,7 +446,7 @@ static ant_value_t js_zlib_write(ant_params_t) {
     if (s) { bytes = (const uint8_t *)s; len = slen; }
   }
 
-  if (!bytes || len == 0) return js_true;
+  if (!bytes) return js_true;
   st->bytes_written += (uint32_t)len;
 
   ant_value_t r = zlib_do_process(js, st, bytes, len, Z_NO_FLUSH);
@@ -476,9 +484,9 @@ static ant_value_t js_zlib_end(ant_params_t) {
   }
 
   st->ended = true;
-  eventemitter_emit_args(js, st->obj, "end", NULL, 0);
+  js_set(js, st->obj, "writable", js_false);
+  stream_readable_push(js, st->obj, js_mknull(), js_mkundef());
   eventemitter_emit_args(js, st->obj, "finish", NULL, 0);
-  eventemitter_emit_args(js, st->obj, "close", NULL, 0);
 
   ant_value_t cb = pick_callback(args, nargs);
   if (is_callable(cb))
@@ -513,8 +521,9 @@ static ant_value_t js_zlib_flush(ant_params_t) {
 
   if (is_callable(cb)) {
     ant_value_t null_val = js_mknull();
-    sv_vm_call(js->vm, js, cb, js_mkundef(), &null_val, 1, NULL, js_mkundef());
+    queue_microtask_with_args(js, cb, &null_val, 1);
   }
+  
   return self;
 }
 
@@ -533,8 +542,8 @@ static ant_value_t js_zlib_reset(ant_params_t) {
     if (deflateReset(&st->strm) != Z_OK) return js_mkerr(js, "zlib reset failed");
   } else if (inflateReset(&st->strm) != Z_OK) return js_mkerr(js, "zlib reset failed");
 
-  st->ended = false;
   st->bytes_written = 0;
+  
   return js_getthis(js);
 }
 
@@ -559,75 +568,29 @@ static ant_value_t js_zlib_params(ant_params_t) {
 }
 
 static ant_value_t js_zlib_close(ant_params_t) {
-  ant_value_t self = js_zlib_destroy(js, NULL, 0, js_mkundef());
+  ant_value_t self = js_getthis(js);
+  ant_value_t destroy = js_get(js, stream_readable_prototype(js), "destroy");
+  ant_value_t result = sv_vm_call(js->vm, js, destroy, self, NULL, 0, NULL, js_mkundef());
+  
+  if (is_err(result)) return result;
   if (nargs > 0 && is_callable(args[0]))
     sv_vm_call(js->vm, js, args[0], js_mkundef(), NULL, 0, NULL, js_mkundef());
+  
   return self;
 }
 
-static ant_value_t js_zlib_destroy(ant_params_t) {
+static ant_value_t js_zlib__destroy(ant_params_t) {
   zlib_stream_t *st = zlib_stream_ptr(js_getthis(js));
-  ant_value_t self = js_getthis(js);
+  if (!st) return js_mkerr_typed(js, JS_ERR_TYPE, "Invalid zlib stream");
 
-  if (!st || st->destroyed) return self;
   st->destroyed = true;
+  js_set(js, st->obj, "writable", js_false);
   zlib_stream_release(st);
-
-  if (nargs > 0 && !js_truthy(js, args[0])) {
-    ant_value_t null_val = js_mknull();
-    eventemitter_emit_args(js, st->obj, "error", &null_val, 1);
-  }
-
-  eventemitter_emit_args(js, st->obj, "close", NULL, 0);
-  return self;
-}
-
-static ant_value_t js_zlib_pause(ant_params_t) {
-  return js_getthis(js);
-}
-
-static ant_value_t js_zlib_resume(ant_params_t) {
-  return js_getthis(js);
-}
-
-static ant_value_t js_zlib_unpipe(ant_params_t) {
-  return js_getthis(js);
-}
-
-static ant_value_t pipe_on_data(ant_params_t) {
-  ant_value_t fn = js_getcurrentfunc(js);
-  ant_value_t dest = js_get_slot(fn, SLOT_DATA);
-  ant_value_t write_fn = js_get(js, dest, "write");
   
-  if (is_callable(write_fn) && nargs > 0)
-    sv_vm_call(js->vm, js, write_fn, dest, args, 1, NULL, js_mkundef());
-    
-  return js_mkundef();
-}
-
-static ant_value_t pipe_on_end(ant_params_t) {
-  ant_value_t fn = js_getcurrentfunc(js);
-  ant_value_t dest = js_get_slot(fn, SLOT_DATA);
-  ant_value_t end_fn = js_get(js, dest, "end");
+  if (nargs > 1 && is_callable(args[1]))
+    return sv_vm_call(js->vm, js, args[1], js_mkundef(), args, 1, NULL, js_mkundef());
   
-  if (is_callable(end_fn))
-    sv_vm_call(js->vm, js, end_fn, dest, NULL, 0, NULL, js_mkundef());
-    
   return js_mkundef();
-}
-
-static ant_value_t js_zlib_pipe(ant_params_t) {
-  if (nargs < 1 || !is_object_type(args[0])) return js_mkundef();
-  ant_value_t self = js_getthis(js);
-  ant_value_t dest = args[0];
-
-  ant_value_t data_handler = js_heavy_mkfun(js, pipe_on_data, dest);
-  ant_value_t end_handler = js_heavy_mkfun(js, pipe_on_end, dest);
-
-  eventemitter_add_listener(js, self, "data", data_handler, false);
-  eventemitter_add_listener(js, self, "end", end_handler, true);
-
-  return dest;
 }
 
 static ant_value_t js_zlib_get_bytes_written(ant_params_t) {
@@ -699,12 +662,12 @@ static ant_value_t zlib_create_stream(ant_t *js, zlib_kind_t kind, ant_value_t o
 
   js_set_native(obj, st, ZLIB_STREAM_TAG);
 
-  js_set(js, obj, "readable", js_true);
+  stream_init_readable_object(js, obj, opts_val);
   js_set(js, obj, "writable", js_true);
   js_set(js, obj, "_processChunk", js_mkfun(js_zlib_process_chunk));
 
   ant_value_t handle_obj = js_mkobj(js);
-  js_set(js, handle_obj, "close", js_mkfun(js_zlib_destroy));
+  js_set(js, handle_obj, "close", js_mkfun(js_zlib_close));
   js_set(js, obj, "_handle", handle_obj);
 
   st->obj = obj;
@@ -1110,24 +1073,16 @@ static ant_value_t make_codes(ant_t *js) {
 static void zlib_init_proto(ant_t *js) {
   if (js->builtins.zlib_transform_proto) return;
 
-  ant_value_t events = events_library(js);
-  ant_value_t ee_ctor = js_get(js, events, "EventEmitter");
-  ant_value_t ee_proto = js_get(js, ee_ctor, "prototype");
-
   js->builtins.zlib_transform_proto = js_mkobj(js);
-  js_set_proto_init(js->builtins.zlib_transform_proto, ee_proto);
+  js_set_proto_init(js->builtins.zlib_transform_proto, stream_readable_prototype(js));
 
   js_set(js, js->builtins.zlib_transform_proto, "write",    js_mkfun(js_zlib_write));
   js_set(js, js->builtins.zlib_transform_proto, "end",      js_mkfun(js_zlib_end));
-  js_set(js, js->builtins.zlib_transform_proto, "destroy",  js_mkfun(js_zlib_destroy));
+  js_set(js, js->builtins.zlib_transform_proto, "_destroy", js_mkfun(js_zlib__destroy));
   js_set(js, js->builtins.zlib_transform_proto, "close",    js_mkfun(js_zlib_close));
   js_set(js, js->builtins.zlib_transform_proto, "flush",    js_mkfun(js_zlib_flush));
   js_set(js, js->builtins.zlib_transform_proto, "params",   js_mkfun(js_zlib_params));
   js_set(js, js->builtins.zlib_transform_proto, "reset",    js_mkfun(js_zlib_reset));
-  js_set(js, js->builtins.zlib_transform_proto, "pause",    js_mkfun(js_zlib_pause));
-  js_set(js, js->builtins.zlib_transform_proto, "resume",   js_mkfun(js_zlib_resume));
-  js_set(js, js->builtins.zlib_transform_proto, "unpipe",   js_mkfun(js_zlib_unpipe));
-  js_set(js, js->builtins.zlib_transform_proto, "pipe",     js_mkfun(js_zlib_pipe));
 
   js_set_getter_desc(js, js->builtins.zlib_transform_proto, "bytesWritten", 12,
   js_mkfun(js_zlib_get_bytes_written), JS_DESC_C);

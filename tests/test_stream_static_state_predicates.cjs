@@ -10,6 +10,8 @@ async function endedReadableReportsFalse() {
   });
 
   assert.strictEqual(stream.isReadable(readable), true);
+  assert.strictEqual(readable.readable, true);
+  assert.strictEqual(readable._readableState.destroyed, false);
   assert.strictEqual(stream.isErrored(readable), false);
   assert.strictEqual(stream.isDestroyed(readable), false);
   assert.strictEqual(stream.isDisturbed(readable), false);
@@ -17,6 +19,8 @@ async function endedReadableReportsFalse() {
   readable.resume();
   await new Promise((resolve) => readable.once('end', resolve));
   assert.strictEqual(readable.readableEnded, true);
+  assert.strictEqual(readable.readable, false);
+  assert.strictEqual(readable._readableState.endEmitted, true);
   assert.strictEqual(stream.isReadable(readable), false);
 }
 
@@ -29,6 +33,10 @@ function destroyedReadableReportsFalse() {
   });
 
   readable.destroy();
+  assert.strictEqual(readable.destroyed, true);
+  assert.strictEqual(readable._readableState.destroyed, true);
+  assert.strictEqual(readable.readable, false);
+  assert.strictEqual(readable._readableState.endEmitted, false);
   assert.strictEqual(stream.isDestroyed(readable), true);
   assert.strictEqual(stream.isReadable(readable), false);
 }

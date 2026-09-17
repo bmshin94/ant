@@ -15,6 +15,8 @@ removed during condensation. See the [plan lifecycle](../index.md).
 
 ## Plans
 
+- [Zlib Readable State](zlib-readable-state.md)
+
 - [Ant Cron API](ant-cron.md)
 - [ARM64 Nightly Benchmarks](arm64-nightly-benchmarks.md)
 - [Buffer Index Coercion Review Fixes](buffer-index-coercion.md)

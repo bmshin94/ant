@@ -221,24 +221,23 @@ function testGzipTransformFinish() {
   });
 }
 
-function testStreamControlMethods() {
-  return new Promise((resolve) => {
-    const stream = zlib.createDeflate();
-    let flushCalled = false;
-    let paramsCalled = false;
-    let closeCalled = false;
+async function testStreamControlMethods() {
+  const stream = zlib.createDeflate();
+  let flushCalled = false;
+  let paramsCalled = false;
+  let closeCalled = false;
 
-    stream.write(Buffer.from('abc'));
-    stream.flush(zlib.constants.Z_SYNC_FLUSH, () => { flushCalled = true; });
-    stream.params(zlib.constants.Z_BEST_SPEED, zlib.constants.Z_DEFAULT_STRATEGY, () => { paramsCalled = true; });
-    stream.reset();
-    stream.close(() => { closeCalled = true; });
-
-    test('flush callback called', flushCalled, true);
-    test('params callback called', paramsCalled, true);
-    test('close callback called', closeCalled, true);
-    resolve();
+  stream.write(Buffer.from('abc'));
+  await new Promise((resolve) => {
+    stream.flush(zlib.constants.Z_SYNC_FLUSH, () => { flushCalled = true; resolve(); });
   });
+  stream.params(zlib.constants.Z_BEST_SPEED, zlib.constants.Z_DEFAULT_STRATEGY, () => { paramsCalled = true; });
+  stream.reset();
+  stream.close(() => { closeCalled = true; });
+
+  test('flush callback called', flushCalled, true);
+  test('params callback called', paramsCalled, true);
+  test('close callback called', closeCalled, true);
 }
 
 function testBytesWritten() {

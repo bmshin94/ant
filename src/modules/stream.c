@@ -406,6 +406,7 @@ static void stream_init_readable(ant_t *js, ant_value_t obj, ant_value_t raw_opt
   js_set(js, state, "objectMode", js_bool(object_mode));
   js_set(js, state, "ended", js_false);
   js_set(js, state, "endEmitted", js_false);
+  js_set(js, state, "destroyed", js_false);
   js_set(js, state, "endScheduled", js_false);
   js_set(js, state, "dataEmitted", js_false);
   js_set(js, state, "errored", js_mkundef());
@@ -776,7 +777,15 @@ static ant_value_t js_stream_destroy(ant_params_t) {
   if (js_truthy(js, js_get(js, stream_obj, "destroyed"))) return stream_obj;
 
   js_set(js, stream_obj, "destroyed", js_true);
-  if (!is_undefined(error) && !is_null(error)) stream_set_errored(js, stream_obj, error);
+  ant_value_t readable_state = stream_readable_state(js, stream_obj);
+  
+  if (is_object_type(readable_state)) {
+    js_set(js, readable_state, "destroyed", js_true);
+    js_set(js, stream_obj, "readable", js_false);
+  }
+  
+  if (!is_undefined(error) && !is_null(error)) 
+    stream_set_errored(js, stream_obj, error);
 
   done_state = js_mkobj(js);
   js_set(js, done_state, "stream", stream_obj);
@@ -855,11 +864,14 @@ static ant_value_t stream_readable_emit_end(ant_params_t) {
 
   tail = stream_readable_decode_chunk(js, stream_obj, js_mkundef(), true);
   if (is_err(tail)) return tail;
+  
   if (!is_undefined(tail) && !stream_value_is_empty_string(js, tail)) {
     js_set(js, state, "dataEmitted", js_true);
     eventemitter_emit_args(js, stream_obj, "data", &tail, 1);
   }
+  
   js_set(js, state, "endEmitted", js_true);
+  js_set(js, stream_obj, "readable", js_false);
   js_set(js, stream_obj, "readableEnded", js_true);
   stream_emit_named(js, stream_obj, "end");
   stream_emit_named(js, stream_obj, "close");
