@@ -580,7 +580,7 @@ static repl_eval_status_t repl_evaluate(
     else if (await_status == JS_REACTOR_AWAIT_INVALID) result = js_mkerr(js, "invalid top-level await completion");
   } else {
     coroutine_release(evaluation.async_coro);
-    js_reactor_pump_repl_nowait(js);
+    if (!js->thrown_exists) js_reactor_pump_repl_nowait(js);
   }
 
   if (result_out) *result_out = result;
@@ -900,6 +900,7 @@ static bool is_incomplete_input(const char *code, size_t len) {
 
 void ant_repl_run(ant_t *js, const char *startup_code) {
   ant_readline_install_signal_handler();
+  js->uncaught_nonfatal = true;
 
   js_set_filename(js, "[repl]");
   js_setup_import_meta(js, "[repl]");

@@ -315,6 +315,16 @@ static void eval_code(
     result = is_err(ns) ? ns : esm_load_commonjs_module(js, tag, script, len, ns, js_mkundef());
   }
   
+  if (js->thrown_exists) {
+    if (!process_has_event_listeners(js, "uncaughtException")) {
+      print_uncaught_throw(js);
+      js_result = EXIT_FAILURE;
+      return;
+    }
+    process_report_uncaught_exception(js);
+    result = js_mkundef();
+  }
+  
   js_run_event_loop(js);
   
   if (print_uncaught_throw(js)) {
@@ -374,6 +384,11 @@ static int execute_module(ant_t *js, const char *filename, const char *cron_peri
   ns = js_esm_import_sync(js, specifier);
   
   free(use_path_owned);
+  if (js->thrown_exists && process_has_event_listeners(js, "uncaughtException")) {
+    process_report_uncaught_exception(js);
+    return EXIT_SUCCESS;
+  }
+  
   if (print_uncaught_throw(js)) return EXIT_FAILURE;
   
   if (vtype(ns) == kTypeError) {
@@ -923,7 +938,7 @@ int main(int argc, char *argv[]) {
     
     fl = resolved_file;
     js_result = execute_module(js, fl, cron_period->count > 0 ? cron_period->sval[0] : NULL);
-    js_run_event_loop(js);
+    if (js_result == EXIT_SUCCESS) js_run_event_loop(js);
     
     free(resolved_file);
     if (js_result != EXIT_SUCCESS) break;

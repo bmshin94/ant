@@ -28,7 +28,7 @@ static inline ant_value_t sv_invoke_native(
 }
 
 static inline void sv_vm_maybe_checkpoint_microtasks(ant_t *js) {
-  if (!js || js->microtasks_draining || js->vm_exec_depth != 0) return;
+  if (!js || js->microtasks_draining || js->vm_exec_depth != 0 || js->thrown_exists) return;
   js_maybe_drain_microtasks(js);
 }
 

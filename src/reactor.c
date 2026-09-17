@@ -2,7 +2,6 @@
 #include "gc/roots.h"
 #include "reactor.h"
 #include "readline.h"
-#include "isolate.h"
 
 #include "modules/fs.h"
 #include "modules/timer.h"
@@ -39,6 +38,7 @@ void js_poll_events(ant_t *js) {
 void js_run_event_loop(ant_t *js) {
 drain:
   while (event_loop_alive(js)) {
+    process_report_uncaught_exception_if_pending(js);
     js_poll_events(js);
     work_flags_t work = get_pending_work(js);
     
@@ -47,8 +47,11 @@ drain:
     else if ((work & WORK_ASYNC) || uv_loop_alive(uv_default_loop()))
       uv_run(uv_default_loop(), UV_RUN_ONCE);
     else break;
+    
+    process_report_uncaught_exception_if_pending(js);
   }
   
+  process_report_uncaught_exception_if_pending(js);
   js_poll_events(js);
   ant_value_t code = js_mknum(0);
   

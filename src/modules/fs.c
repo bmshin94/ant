@@ -20,6 +20,7 @@
 #include "utils.h"
 #include "base64.h"
 #include "errors.h"
+#include "modules/process.h"
 #include "watch.h"
 #include "internal.h"
 #include "descriptors.h"
@@ -224,6 +225,15 @@ static ant_value_t fs_call_value(
   else result = sv_vm_call(js->vm, js, fn, this_val, args, nargs, NULL, js_mkundef());
   js->this_val = saved_this;
   
+  return result;
+}
+
+static ant_value_t fs_call_callback(
+  ant_t *js, ant_value_t fn,
+  ant_value_t *args, int nargs
+) {
+  ant_value_t result = fs_call_value(js, fn, js_mkundef(), args, nargs);
+  process_report_uncaught_exception_if_pending(js);
   return result;
 }
 
@@ -1030,7 +1040,7 @@ static void fs_watcher_invoke_watchfile_stats(
 
   args[0] = fs_stats_object_from_uv(watcher->js, &curr_stat);
   args[1] = fs_stats_object_from_uv(watcher->js, &prev_stat);
-  fs_call_value(watcher->js, watcher->callback, js_mkundef(), args, 2);
+  fs_call_callback(watcher->js, watcher->callback, args, 2);
 }
 
 static void fs_watcher_on_event(
@@ -4354,10 +4364,10 @@ static void on_fsync_complete(uv_fs_t *uv_req) {
   if (uv_req->result < 0) {
     ant_value_t err = fs_mk_uv_error(req->js, (int)uv_req->result, "fsync", NULL, NULL);
     ant_value_t cb_args[1] = { err };
-    fs_call_value(req->js, req->callback_fn, js_mkundef(), cb_args, 1);
+    fs_call_callback(req->js, req->callback_fn, cb_args, 1);
   } else {
     ant_value_t cb_args[1] = { js_mknull() };
-    fs_call_value(req->js, req->callback_fn, js_mkundef(), cb_args, 1);
+    fs_call_callback(req->js, req->callback_fn, cb_args, 1);
   }
 
   remove_pending_request(req);
@@ -4418,7 +4428,7 @@ static void on_read_fd_complete(uv_fs_t *uv_req) {
     if (is_callable(req->callback_fn)) {
       ant_value_t err = js_mkerr(req->js, "read failed: %s", uv_strerror((int)uv_req->result));
       ant_value_t cb_args[1] = { err };
-      fs_call_value(req->js, req->callback_fn, js_mkundef(), cb_args, 1);
+      fs_call_callback(req->js, req->callback_fn, cb_args, 1);
       remove_pending_request(req);
       free_fs_request(req);
       return;
@@ -4441,7 +4451,7 @@ static void on_read_fd_complete(uv_fs_t *uv_req) {
 
   if (is_callable(req->callback_fn)) {
     ant_value_t cb_args[3] = { js_mknull(), js_mknum((double)bytes_read), req->target_buffer };
-    fs_call_value(req->js, req->callback_fn, js_mkundef(), cb_args, 3);
+    fs_call_callback(req->js, req->callback_fn, cb_args, 3);
     remove_pending_request(req);
     free_fs_request(req);
     return;
@@ -5184,12 +5194,12 @@ static ant_value_t fs_callback_success_handler(ant_params_t) {
 
   if (js_truthy(js, js_get(js, ctx, "existsStyle"))) {
     ant_value_t cb_args[1] = { nargs > 0 ? args[0] : js_false };
-    fs_call_value(js, callback, js_mkundef(), cb_args, 1);
+    fs_call_callback(js, callback, cb_args, 1);
     return js_mkundef();
   }
 
   ant_value_t cb_args[2] = { js_mknull(), nargs > 0 ? args[0] : js_mkundef() };
-  fs_call_value(js, callback, js_mkundef(), cb_args, 2);
+  fs_call_callback(js, callback, cb_args, 2);
   return js_mkundef();
 }
 
@@ -5202,12 +5212,12 @@ static ant_value_t fs_callback_error_handler(ant_params_t) {
 
   if (js_truthy(js, js_get(js, ctx, "existsStyle"))) {
     cb_args[0] = js_false;
-    fs_call_value(js, callback, js_mkundef(), cb_args, 1);
+    fs_call_callback(js, callback, cb_args, 1);
     return js_mkundef();
   }
 
   cb_args[0] = nargs > 0 ? args[0] : js_mkundef();
-  fs_call_value(js, callback, js_mkundef(), cb_args, 1);
+  fs_call_callback(js, callback, cb_args, 1);
   return js_mkundef();
 }
 
@@ -5219,12 +5229,12 @@ static void fs_callback_emit_success(
 ) {
   if (exists_style) {
     ant_value_t cb_args[1] = { value };
-    fs_call_value(js, callback, js_mkundef(), cb_args, 1);
+    fs_call_callback(js, callback, cb_args, 1);
     return;
   }
 
   ant_value_t cb_args[2] = { js_mknull(), value };
-  fs_call_value(js, callback, js_mkundef(), cb_args, 2);
+  fs_call_callback(js, callback, cb_args, 2);
 }
 
 static void fs_callback_emit_error(
@@ -5236,7 +5246,7 @@ static void fs_callback_emit_error(
   ant_value_t cb_args[1];
 
   cb_args[0] = exists_style ? js_false : error;
-  fs_call_value(js, callback, js_mkundef(), cb_args, 1);
+  fs_call_callback(js, callback, cb_args, 1);
 }
 
 static ant_value_t fs_callback_attach_promise(

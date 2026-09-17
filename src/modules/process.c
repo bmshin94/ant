@@ -36,6 +36,7 @@
 #include "internal.h"
 #include "descriptors.h"
 #include "silver/engine.h"
+#include "gc/roots.h"
 #include "gc/modules.h"
 
 #include "modules/events.h"
@@ -304,6 +305,39 @@ bool process_has_event_listeners(ant_t *js, const char *event_type) {
   ant_process_state_t *ps = js->process_state;
   if (!ps || !event_type || !is_object_type(ps->process_obj)) return false;
   return eventemitter_listener_count(js, ps->process_obj, event_type) > 0;
+}
+
+bool process_report_uncaught_exception(ant_t *js) {
+  if (!js || !js->thrown_exists) return false;
+
+  GC_ROOT_SAVE(root_mark, js);
+  ant_value_t stack = js->thrown_stack;
+  ant_value_t reason = js_take_thrown(js, js_mkundef());
+  
+  GC_ROOT_PIN(js, reason);
+  GC_ROOT_PIN(js, stack);
+
+  if (process_has_event_listeners(js, "uncaughtException")) {
+    ant_value_t origin = js_mkstr(js, "uncaughtException", 17);
+    GC_ROOT_PIN(js, origin);
+
+    ant_value_t event_args[2] = { reason, origin };
+    emit_process_event(js, "uncaughtException", event_args, 2);
+
+    if (js->thrown_exists) {
+      js_take_thrown(js, js_mkundef());
+      if (!js->uncaught_nonfatal) exit(7);
+    }
+
+    GC_ROOT_RESTORE(js, root_mark);
+    return true;
+  }
+
+  print_error_value(js, reason, stack, NULL);
+  if (!js->uncaught_nonfatal) exit(EXIT_FAILURE);
+
+  GC_ROOT_RESTORE(js, root_mark);
+  return true;
 }
 
 static const char *stdin_escape_name(const char *seq, int len) {

@@ -329,6 +329,7 @@ struct ant_isolate_t {
   bool owns_mem;
   bool fatal_error;
   bool thrown_exists;
+  bool uncaught_nonfatal;
 
   struct {
     ant_pool_t young;

@@ -17,6 +17,7 @@
 
 #include "modules/abort.h"
 #include "modules/timer.h"
+#include "modules/process.h"
 #include "modules/symbol.h"
 
 typedef struct timer_entry {
@@ -293,6 +294,7 @@ static void timer_callback(uv_timer_t *handle) {
   
   ant_t *js = timer_state.js;
   ant_value_t callback = entry->callback;
+  
   if (!entry->is_interval) {
     entry->active = 0;
     timer_state.active_timer_count--;
@@ -302,10 +304,13 @@ static void timer_callback(uv_timer_t *handle) {
 
   GC_ROOT_SAVE(root_mark, js);
   GC_ROOT_PIN(js, callback);
+  
   for (int i = 0; i < entry->nargs; i++) GC_ROOT_PIN(js, entry->args[i]);
   sv_vm_call(js->vm, js, callback, js_mkundef(), entry->args, entry->nargs, NULL, js_mkundef());
   GC_ROOT_RESTORE(js, root_mark);
+  
   if (!entry->is_interval && !entry->active) timer_release_callback_args(entry);
+  process_report_uncaught_exception_if_pending(js);
   process_microtasks(js);
 }
 
@@ -831,8 +836,8 @@ static inline void process_microtask_entry(ant_t *js, microtask_entry_t *entry) 
   }
 
   ant_value_t this_val = js_mkundef();
-
   GC_ROOT_SAVE(root_mark, js);
+  
   ant_value_t callback = entry->callback;
   GC_ROOT_PIN(js, callback);
   GC_ROOT_PIN(js, this_val);
@@ -841,6 +846,7 @@ static inline void process_microtask_entry(ant_t *js, microtask_entry_t *entry) 
   sv_vm_call(js->vm, js, callback, this_val, entry->argv, entry->argc, NULL, js_mkundef());
 
   GC_ROOT_RESTORE(js, root_mark);
+  process_report_uncaught_exception_if_pending(js);
 }
 
 static inline microtask_entry_t *take_microtask_batch(void) {
@@ -929,22 +935,22 @@ bool js_maybe_drain_microtasks_after_async_settle(ant_t *js) {
 }
 
 void process_immediates(ant_t *js) {
-while (timer_state.immediates != NULL) {
-  immediate_entry_t *entry = timer_state.immediates;
-  timer_state.immediates = entry->next;
-  
-  if (timer_state.immediates == NULL) {
-    timer_state.immediates_tail = NULL;
+  while (timer_state.immediates != NULL) {
+    immediate_entry_t *entry = timer_state.immediates;
+    
+    timer_state.immediates = entry->next;
+    if (timer_state.immediates == NULL) timer_state.immediates_tail = NULL;
+    
+    if (entry->active) {
+      ant_value_t args[0];
+      sv_vm_call(js->vm, js, entry->callback, js_mkundef(), args, 0, NULL, js_mkundef());
+      process_report_uncaught_exception_if_pending(js);
+      process_microtasks(js);
+    }
+    
+    free(entry);
   }
-  
-  if (entry->active) {
-    ant_value_t args[0];
-    sv_vm_call(js->vm, js, entry->callback, js_mkundef(), args, 0, NULL, js_mkundef());
-    process_microtasks(js);
-  }
-  
-  free(entry);
-}}
+}
 
 int has_pending_immediates(void) {
   for (
