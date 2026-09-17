@@ -39,6 +39,107 @@ static inline ant_value_t json_stringify_oom(ant_t *js) {
   return js_mkerr(js, "JSON.stringify() failed: out of memory");
 }
 
+static inline bool json_read_hex4(const char *p, uint32_t *out) {
+  uint32_t value = 0;
+  
+  for (int k = 0; k < 4; k++) {
+    unsigned char c = (unsigned char)p[k];
+    uint32_t digit;
+    if (c >= '0' && c <= '9') digit = c - '0';
+    else if ((c | 0x20) >= 'a' && (c | 0x20) <= 'f') digit = (c | 0x20) - 'a' + 10;
+    else return false;
+    value = (value << 4) | digit;
+  }
+  
+  *out = value;
+  return true;
+}
+
+/*
+ * yyjson rejects lone surrogate escapes (\uD800..\uDFFF without a partner) and
+ * raw WTF-8 surrogate bytes, both of which JSON.parse must accept. Rewrite the
+ * lone escapes into WTF-8 so a retry with ALLOW_INVALID_UNICODE can read them.
+ * That flag also makes yyjson accept raw control characters inside strings, so
+ * reject those here to keep them SyntaxErrors. Only runs after a parse failure.
+ */
+static char *json_wtf8_rewrite(const char *src, size_t len, size_t *out_len) {
+  char *dst = malloc(len ? len : 1);
+  if (!dst) return NULL;
+
+  size_t i = 0, n = 0;
+  bool in_str = false;
+
+  while (i < len) {
+    unsigned char c = (unsigned char)src[i];
+
+    if (!in_str || c == '"') {
+      if (c == '"') in_str = !in_str;
+      dst[n++] = (char)c;
+      i++;
+      continue;
+    }
+
+    if (c < 0x20) {
+      free(dst);
+      return NULL;
+    }
+
+    if (c != '\\') {
+      dst[n++] = (char)c;
+      i++;
+      continue;
+    }
+
+    uint32_t hi, lo;
+    if (i + 6 > len || src[i + 1] != 'u' || !json_read_hex4(src + i + 2, &hi)) {
+      size_t take = i + 2 <= len ? 2 : 1;
+      memcpy(dst + n, src + i, take);
+      n += take;
+      i += take;
+      continue;
+    }
+
+    if ((hi & 0xF800) != 0xD800) {
+      memcpy(dst + n, src + i, 6);
+      n += 6;
+      i += 6;
+      continue;
+    }
+
+    if (
+      hi <= 0xDBFF && i + 12 <= len && src[i + 6] == '\\' && src[i + 7] == 'u' &&
+      json_read_hex4(src + i + 8, &lo) && (lo & 0xFC00) == 0xDC00
+    ) {
+      memcpy(dst + n, src + i, 12);
+      n += 12;
+      i += 12;
+      continue;
+    }
+
+    dst[n++] = (char)(0xE0 | (hi >> 12));
+    dst[n++] = (char)(0x80 | ((hi >> 6) & 0x3F));
+    dst[n++] = (char)(0x80 | (hi & 0x3F));
+    i += 6;
+  }
+
+  *out_len = n;
+  return dst;
+}
+
+static yyjson_doc *json_read_doc(const char *str, size_t len) {
+  yyjson_read_err err;
+  yyjson_doc *doc = yyjson_read_opts((char *)str, len, 0, NULL, &err);
+  if (doc || err.code != YYJSON_READ_ERROR_INVALID_STRING) return doc;
+
+  size_t wtf8_len = 0;
+  char *wtf8 = json_wtf8_rewrite(str, len, &wtf8_len);
+  if (!wtf8) return NULL;
+
+  doc = yyjson_read_opts(wtf8, wtf8_len, YYJSON_READ_ALLOW_INVALID_UNICODE, NULL, NULL);
+  free(wtf8);
+  return doc;
+}
+
 static bool json_shape_matches(ant_shape_t *shape, yyjson_val *val) {
   if (!shape || ant_shape_count(shape) != yyjson_obj_size(val)) return false;
   size_t idx, max;
@@ -1008,9 +1109,8 @@ ant_value_t js_json_parse(ant_params_t) {
   
   size_t len;
   char *json_str = js_getstr(js, args[0], &len);
-  
-  yyjson_doc *doc = yyjson_read(json_str, len, 0);
-  
+  yyjson_doc *doc = json_read_doc(json_str, len);
+
   if (!doc) {
     gc_temp_root_scope_end(&temp_roots);
     return js_mkerr_typed(js, JS_ERR_SYNTAX, "JSON.parse: unexpected character");
