@@ -1551,17 +1551,18 @@ static ant_value_t finreg_register(ant_params_t) {
   ant_value_t this_val = js->this_val;
   if (vtype(this_val) != kTypeObject) return js_mkundef();
   
-  if (nargs < 1 || vtype(args[0]) != kTypeObject) {
+  if (nargs < 1 || !can_be_held_weakly(args[0]))
     return js_mkerr(js, "FinalizationRegistry.register target must be an object");
-  }
   
   ant_value_t target = args[0];
   ant_value_t held_value = nargs > 1 ? args[1] : js_mkundef();
   ant_value_t unregister_token = nargs > 2 ? args[2] : js_mkundef();
   
-  if (vdata(target) == vdata(held_value) && vtype(held_value) == kTypeObject) {
+  if (target == held_value)
     return js_mkerr(js, "target and held value must not be the same");
-  }
+  
+  if (vtype(unregister_token) != kTypeUndefined && !can_be_held_weakly(unregister_token))
+    return js_mkerr(js, "FinalizationRegistry.register token must be an object");
   
   ant_value_t registrations = js_get_slot(this_val, SLOT_MAP);
   if (vtype(registrations) != kTypeArray) return js_mkundef();
@@ -1589,9 +1590,8 @@ static ant_value_t finreg_unregister(ant_params_t) {
   ant_value_t this_val = js->this_val;
   if (vtype(this_val) != kTypeObject) return js_false;
   
-  if (nargs < 1 || vtype(args[0]) != kTypeObject) {
+  if (nargs < 1 || !can_be_held_weakly(args[0]))
     return js_mkerr(js, "FinalizationRegistry.unregister token must be an object");
-  }
   
   ant_value_t token = args[0];
   ant_value_t registrations = js_get_slot(this_val, SLOT_MAP);
@@ -1604,7 +1604,7 @@ static ant_value_t finreg_unregister(ant_params_t) {
     ant_value_t entry = js_arr_get(js, registrations, i);
     if (vtype(entry) != kTypeArray) continue;
     ant_value_t entry_token = js_arr_get(js, entry, 2);
-    if (vtype(entry_token) == kTypeObject && vdata(entry_token) == vdata(token)) {
+    if (entry_token == token) {
       char idx[16];
       size_t idx_len = uint_to_str(idx, sizeof(idx), i);
       js_setprop(js, registrations, js_mkstr(js, idx, idx_len), js_mkundef());
