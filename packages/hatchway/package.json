@@ -1,0 +1,37 @@
+{
+  "name": "hatchway",
+  "version": "0.1.0",
+  "description": "Open your app in DevTools. A userland CDP console for application commands.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theMackabu/ant.git",
+    "directory": "packages/hatchway"
+  },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./node": { "types": "./dist/node.d.ts", "default": "./dist/node.js" },
+    "./workers": { "types": "./dist/workers.d.ts", "default": "./dist/workers.js" }
+  },
+  "types": "./dist/index.d.ts",
+  "bin": { "hatchway": "./dist/cli.js" },
+  "files": ["dist", "README.md", "LICENSE"],
+  "sideEffects": false,
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:devtools": "npm run build && node test/devtools.mjs",
+    "example": "npm run build && node examples/node.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": { "ws": "^8.21.3" },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3",
+    "miniflare": "^4.20260730.0",
+    "playwright": "^1.63.0"
+  }
+}

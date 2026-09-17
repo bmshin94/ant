@@ -15,6 +15,8 @@ removed during condensation. See the [plan lifecycle](../index.md).
 
 ## Plans
 
+- [Hatchway](hatchway.md)
+
 - [Zlib Readable State](zlib-readable-state.md)
 
 - [Ant Cron API](ant-cron.md)
