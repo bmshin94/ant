@@ -150,6 +150,7 @@ typedef struct {
 } jit_features_t;
 
 void jit_load_externals_once(sv_jit_ctx_t *jc);
+sv_jit_func_t jit_ssa_compile(ant_t *js, sv_func_t *func);
 void jit_release_gen_scratch(sv_jit_ctx_t *jc, MIR_context_t ctx);
 int jit_hot_loop_upvalue(const sv_func_t *func);
 jit_value_info_t vstack_value_info(const jit_vstack_t *vs, int idx);

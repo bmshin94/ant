@@ -443,6 +443,15 @@ jit_inline_eligibility_test = executable(
 )
 test('jit-inline-eligibility', jit_inline_eligibility_test)
 
+jit_ssa_test = executable(
+  'test-jit-ssa',
+  files('tests/test_jit_ssa.c'),
+  dependencies: libant_dep,
+  c_args: ['-UNDEBUG'],
+  build_by_default: false
+)
+test('jit-ssa', jit_ssa_test)
+
 jit_property_ic_test = executable(
   'test-jit-property-ic',
   files('tests/test_jit_property_ic.c'),

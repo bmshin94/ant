@@ -6,6 +6,7 @@
 
 #include "silver/call.h"
 #include "silver/glue.h"
+#include "silver/deopt.h"
 #include "silver/feedback.h"
 
 void *jit_helper_tier_up(ant_t *js, sv_func_t *func, sv_closure_t *closure) {
@@ -38,6 +39,18 @@ void jit_load_externals_once(sv_jit_ctx_t *jc) {
     MIR_load_external(jc->ctx_hot, #name, name); \
   } while (0)
   LOAD_EXT(jit_helper_add);
+  LOAD_EXT(jit_helper_ssa_deopt);
+  LOAD_EXT(jit_helper_ssa_deopt_alloc);
+  LOAD_EXT(jit_helper_ssa_deopt_owned);
+  LOAD_EXT(jit_helper_ssa_record_element);
+  LOAD_EXT(jit_helper_ssa_get_global);
+  LOAD_EXT(jit_helper_ssa_eq);
+  LOAD_EXT(jit_helper_ssa_ne);
+  LOAD_EXT(jit_helper_ssa_put_field);
+  LOAD_EXT(jit_helper_ssa_put_elem);
+  LOAD_EXT(jit_helper_ssa_put_global);
+  LOAD_EXT(gc_temp_root_scope_borrow);
+  LOAD_EXT(gc_temp_root_scope_end);
   LOAD_EXT(jit_helper_record_call_target);
   LOAD_EXT(jit_helper_add_at_site);
   LOAD_EXT(jit_helper_sub);

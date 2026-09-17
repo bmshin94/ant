@@ -1306,6 +1306,7 @@ static ant_value_t jit_resume_in_interpreter(
   vm->jit_resume.n_locals   = n_locals;
   vm->jit_resume.vstack     = vstack;
   vm->jit_resume.vstack_sp  = vstack_sp;
+  vm->jit_resume.child      = NULL;
 
   return sv_execute_closure_entry(
     vm, closure, mkref(kTypeFunction, closure),

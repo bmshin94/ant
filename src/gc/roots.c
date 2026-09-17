@@ -42,8 +42,17 @@ void gc_temp_root_scope_begin(ant_t *js, gc_temp_root_scope_t *scope) {
   scope->items = NULL;
   scope->len = 0;
   scope->cap = 0;
+  scope->borrowed = false;
   scope->prev = js ? js->temp_roots : NULL;
   if (js) js->temp_roots = scope;
+}
+
+void gc_temp_root_scope_borrow(ant_t *js, gc_temp_root_scope_t *scope,
+                               ant_value_t *values, size_t count) {
+  gc_temp_root_scope_begin(js, scope);
+  scope->items = values;
+  scope->len = scope->cap = count;
+  scope->borrowed = true;
 }
 
 void gc_temp_root_scope_end(gc_temp_root_scope_t *scope) {
@@ -52,17 +61,18 @@ void gc_temp_root_scope_end(gc_temp_root_scope_t *scope) {
   ant_t *js = scope->js;
   if (js && js->temp_roots == scope) js->temp_roots = scope->prev;
 
-  free(scope->items);
+  if (!scope->borrowed) free(scope->items);
   scope->items = NULL;
   scope->len = 0;
   scope->cap = 0;
   scope->prev = NULL;
   scope->js = NULL;
+  scope->borrowed = false;
 }
 
 gc_temp_root_handle_t gc_temp_root_add(gc_temp_root_scope_t *scope, ant_value_t value) {
   gc_temp_root_handle_t invalid = {0};
-  if (!scope) return invalid;
+  if (!scope || scope->borrowed) return invalid;
 
   if (scope->len >= scope->cap) {
     size_t new_cap = scope->cap ? scope->cap * 2 : 16;

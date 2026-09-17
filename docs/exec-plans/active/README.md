@@ -8,6 +8,9 @@ Store in-progress execution plans here.
 
 ## Active
 
+- [Silver SSA optimizing tier](silver-ssa-optimizing-tier.md): connected SSA,
+  inlining, memory facts, loop analysis and representation-selection experiment.
+
 - [Generated-code capability experiments](jit-capability-experiments.md)
 
 - [Survivor aging and literal string pretenuring](gc-survivors-and-strings.md)

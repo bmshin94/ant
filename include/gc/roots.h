@@ -14,6 +14,7 @@ typedef struct gc_temp_root_scope {
   size_t len;
   size_t cap;
   struct gc_temp_root_scope *prev;
+  bool borrowed;
 } gc_temp_root_scope_t;
 
 typedef struct {
@@ -35,6 +36,10 @@ void gc_register_root(ant_value_t *slot);
 void gc_pop_roots(ant_t *js, size_t mark);
 void gc_visit_roots(ant_t *js, gc_root_visitor_t visitor);
 void gc_temp_root_scope_begin(ant_t *js, gc_temp_root_scope_t *scope);
+// Register a caller-owned, fixed-size value buffer. Values may be updated in
+// place; the scope neither grows nor frees the buffer. Scopes remain LIFO.
+void gc_temp_root_scope_borrow(ant_t *js, gc_temp_root_scope_t *scope,
+                               ant_value_t *values, size_t count);
 void gc_temp_root_scope_end(gc_temp_root_scope_t *scope);
 void gc_temp_root_truncate(gc_temp_root_scope_t *scope, size_t mark);
 

@@ -299,6 +299,8 @@ typedef struct {
 typedef struct {
   uint8_t *type_feedback;
   sv_ctor_prop_fb_t ctor_prop_fb;
+  uint32_t ssa_failed_tfb_version;
+  bool ssa_failed;
 } sv_func_sidecar_t;
 
 static_assert(
@@ -857,6 +859,7 @@ struct sv_vm {
     int64_t n_locals;
     ant_value_t *vstack;
     int64_t vstack_sp;
+    const struct sv_deopt_continuation *child;
   } jit_resume;
 
   sv_jit_osr_t jit_osr;

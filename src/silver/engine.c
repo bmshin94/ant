@@ -13,6 +13,7 @@
 #include "silver/call.h"
 #include "silver/feedback.h"
 #include "silver/jit.h"
+#include "silver/deopt.h"
 #include "modules/regex.h"
 #include "silver/glue.h"
 #include "ops/literals.h"
@@ -414,6 +415,7 @@ static inline void sv_clear_jit_resume(sv_vm_t *vm) {
   vm->jit_resume.n_locals = 0;
   vm->jit_resume.vstack = NULL;
   vm->jit_resume.vstack_sp = 0;
+  vm->jit_resume.child = NULL;
 }
 
 bool sv_lookup_srcpos(sv_func_t *func, int bc_offset, uint32_t *line, uint32_t *col) {
@@ -1266,6 +1268,7 @@ ant_value_t sv_execute_frame(sv_vm_t *vm, sv_func_t *func, ant_value_t this, ant
   
   ant_value_t *entry_bp = NULL;
   ant_value_t *entry_lp = NULL;
+  const sv_deopt_continuation_t *deopt_child = NULL;
   
   if (!resuming) {
   ant_value_t stage_err = sv_stage_frame_args(vm, js, func, args, argc, &entry_bp, &entry_lp);
@@ -1313,6 +1316,7 @@ ant_value_t sv_execute_frame(sv_vm_t *vm, sv_func_t *func, ant_value_t this, ant
   ant_value_t *lp = frame->lp;
 
   if (!resuming && vm->jit_resume.active) {
+    deopt_child = vm->jit_resume.child;
     for (int64_t i = 0; i < vm->jit_resume.vstack_sp; i++)
       vm->stack[vm->sp++] = vm->jit_resume.vstack[i];
 
@@ -1416,6 +1420,21 @@ ant_value_t sv_execute_frame(sv_vm_t *vm, sv_func_t *func, ant_value_t this, ant
       }                                                                     \
     }                                                                       \
   } while (0)
+  if (deopt_child) {
+    // The caller's pre-call effects have already happened in generated code.
+    // Keep its interpreter frame present while resuming the child, then feed
+    // the result into the saved continuation instead of invoking it again.
+    frame->ip = func->code + deopt_child->parent_call_offset;
+    sv_err = sv_ssa_resume_frame(vm, deopt_child);
+    frame = &vm->frames[vm->fp];
+    func = frame->func;
+    bp = frame->bp;
+    lp = frame->lp;
+    if (is_err(sv_err)) goto sv_throw;
+    if (deopt_child->return_to_parent) { vm_result = sv_err; goto sv_leave; }
+    vm->stack[vm->sp - 1] = sv_err;
+    frame->ip = ip;
+  }
   if (resuming) {
     bool yield_star_resume = ip && (
       *ip == OP_YIELD_STAR_NEXT ||

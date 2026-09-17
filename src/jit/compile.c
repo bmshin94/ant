@@ -174,6 +174,27 @@ sv_jit_func_t sv_jit_compile_tier(ant_t *js, sv_func_t *func, sv_closure_t *hint
     c->func->back_edge_count >= JIT_HOT_COMPILE_BACKEDGE_THRESHOLD));
   c->ctx = jit_compile_hot ? c->jc->ctx_hot : c->jc->ctx;
 
+  const char *ssa_mode = getenv("ANT_JIT_SSA");
+  sv_func_sidecar_t *ssa_state = sv_func_sidecar(func);
+  bool ssa_rejected = ssa_state && ssa_state->ssa_failed && ssa_state->ssa_failed_tfb_version == func->tfb_version;
+  if (jit_compile_hot && !ssa_rejected && ssa_mode && strcmp(ssa_mode, "1") == 0) {
+    sv_jit_func_t ssa = jit_ssa_compile(js, func);
+    if (ssa) {
+      func->jit_compiling = false;
+      func->jit_compiled_tfb_ver = func->tfb_version;
+      func->jit_code_cold = false;
+      if (sv_jit_warn_unlikely) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (double)(now.tv_sec - compile_t0.tv_sec) * 1000.0 +
+            (double)(now.tv_nsec - compile_t0.tv_nsec) / 1e6;
+        fprintf(stderr, "jit: compiled func=%s tier=ssa ms=%.1f\n",
+                func->debug && func->debug->name ? func->debug->name : "<anonymous>", elapsed);
+      }
+      return ssa;
+    }
+  }
+
   c->forward_arguments = jit_can_forward_arguments(func);
   if (!jit_setup_frame(c)) return NULL;
 
